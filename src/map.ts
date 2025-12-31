@@ -731,6 +731,9 @@ private async applyViewEditorResult(cfg: ViewEditorConfig): Promise<void> {
     const { w, h } = this.getOuterSizePx();
     const { t, r, b, l } = this.computeViewportInsetsPx(w, h);
     this.viewportEl.style.inset = `${t}px ${r}px ${b}px ${l}px`;
+    if (this.hudClipEl) {
+      this.hudClipEl.style.inset = `${t}px ${r}px ${b}px ${l}px`;
+    }
   }
 
   private async loadViewportFrameNaturalSize(): Promise<void> {
@@ -902,8 +905,9 @@ private async applyViewEditorResult(cfg: ViewEditorConfig): Promise<void> {
       this.viewportFrameEl = img;
     }
 
-    // HUD clip (so tooltips/HUD don’t spill into the page)
-    this.hudClipEl = this.viewportEl.createDiv({ cls: "zm-hud-clip" });
+    // HUD clip must be above the frame.
+    this.hudClipEl = this.el.createDiv({ cls: "zm-hud-clip" });
+    this.applyViewportInset();
 
     this.hudMarkersEl = this.hudClipEl.createDiv({ cls: "zm-hud-markers" });
     this.measureHud = this.hudClipEl.createDiv({ cls: "zm-measure-hud" });
@@ -2397,10 +2401,17 @@ private async applyViewEditorResult(cfg: ViewEditorConfig): Promise<void> {
       const activeId = meas?.customUnitId;
       const def =
         (activeId && defs.find((d) => d.id === activeId)) ??
-        defs[0];
+        defs[0] ??
+        null;
+      if (!def) {
+        return `${round(m, 2)} u`;
+      }
 
       const val = m / (def.metersPerUnit || 1);
-      const label = def.abbreviation || def.name || "u";
+      const label =
+        (typeof def.abbreviation === "string" && def.abbreviation.trim()) ||
+        (typeof def.name === "string" && def.name.trim()) ||
+        "u";
       return `${round(val, 2)} ${label}`;
     }
 
@@ -6304,7 +6315,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     this.zoomHudTimer = window.setTimeout(() => {
       this.zoomHud?.classList.remove("zm-zoom-hud-visible");
       this.zoomHudTimer = null;
-    }, 5000); // 5 seconds display time
+    }, 1000); // 5 seconds display time
   }
 
   private requestPanFrame(): void {

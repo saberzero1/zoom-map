@@ -454,7 +454,7 @@ export class ViewEditorModal extends Modal {
 	// ID
 	new Setting(contentEl)
 	  .setClass("zoommap-view-editor-row")
-	  .setName("ID (optional)")
+	  .setName("ID = optional")
 	  .setDesc("Stable identifier if you store markers inline in the note.")
 	  .addText((t) => {
 		t.setPlaceholder("Map-world-1");
@@ -505,11 +505,11 @@ export class ViewEditorModal extends Modal {
     const unitSetting = new Setting(contentEl)
       .setClass("zoommap-view-editor-row")
       .setName("Viewport insets unit")
-      .setDesc('framePx = values in the frame image pixel space; percent = 0..100 of the outer box.');
+      .setDesc('Framepx = values in the frame image pixel space. Percent = 0..100 of the outer box.');
 
     unitSetting.addDropdown((d) => {
-      d.addOption("framePx", "framePx");
-      d.addOption("percent", "percent");
+      d.addOption("framePx", "Framepx");
+      d.addOption("percent", "Percent");
       d.setValue(insets.unit);
       d.onChange((v) => {
         insets.unit = (v === "percent" ? "percent" : "framePx");

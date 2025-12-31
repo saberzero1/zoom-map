@@ -1713,7 +1713,7 @@ var ViewEditorModal = class extends import_obsidian10.Modal {
         this.cfg.align = v || void 0;
       });
     });
-    new import_obsidian10.Setting(contentEl).setClass("zoommap-view-editor-row").setName("ID (optional)").setDesc("Stable identifier if you store markers inline in the note.").addText((t) => {
+    new import_obsidian10.Setting(contentEl).setClass("zoommap-view-editor-row").setName("ID = optional").setDesc("Stable identifier if you store markers inline in the note.").addText((t) => {
       var _a;
       t.setPlaceholder("Map-world-1");
       t.setValue((_a = this.cfg.id) != null ? _a : "");
@@ -1750,10 +1750,10 @@ var ViewEditorModal = class extends import_obsidian10.Modal {
         if (frameInputEl) frameInputEl.value = "";
       })
     );
-    const unitSetting = new import_obsidian10.Setting(contentEl).setClass("zoommap-view-editor-row").setName("Viewport insets unit").setDesc("framePx = values in the frame image pixel space; percent = 0..100 of the outer box.");
+    const unitSetting = new import_obsidian10.Setting(contentEl).setClass("zoommap-view-editor-row").setName("Viewport insets unit").setDesc("Framepx = values in the frame image pixel space. Percent = 0..100 of the outer box.");
     unitSetting.addDropdown((d) => {
-      d.addOption("framePx", "framePx");
-      d.addOption("percent", "percent");
+      d.addOption("framePx", "Framepx");
+      d.addOption("percent", "Percent");
       d.setValue(insets.unit);
       d.onChange((v) => {
         insets.unit = v === "percent" ? "percent" : "framePx";
@@ -3048,6 +3048,9 @@ var MapInstance = class extends import_obsidian13.Component {
     const { w, h } = this.getOuterSizePx();
     const { t, r, b, l } = this.computeViewportInsetsPx(w, h);
     this.viewportEl.style.inset = `${t}px ${r}px ${b}px ${l}px`;
+    if (this.hudClipEl) {
+      this.hudClipEl.style.inset = `${t}px ${r}px ${b}px ${l}px`;
+    }
   }
   async loadViewportFrameNaturalSize() {
     const img = this.viewportFrameEl;
@@ -3186,7 +3189,8 @@ var MapInstance = class extends import_obsidian13.Component {
       img.src = this.resolveResourceUrl(this.cfg.viewportFrame.trim());
       this.viewportFrameEl = img;
     }
-    this.hudClipEl = this.viewportEl.createDiv({ cls: "zm-hud-clip" });
+    this.hudClipEl = this.el.createDiv({ cls: "zm-hud-clip" });
+    this.applyViewportInset();
     this.hudMarkersEl = this.hudClipEl.createDiv({ cls: "zm-hud-markers" });
     this.measureHud = this.hudClipEl.createDiv({ cls: "zm-measure-hud" });
     this.zoomHud = this.hudClipEl.createDiv({ cls: "zm-zoom-hud" });
@@ -4370,7 +4374,7 @@ var MapInstance = class extends import_obsidian13.Component {
     return px * mpp;
   }
   formatDistance(m) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     const meas = (_a = this.data) == null ? void 0 : _a.measurement;
     const unit = (_b = meas == null ? void 0 : meas.displayUnit) != null ? _b : "auto-metric";
     const round = (v, d = 2) => Math.round(v * 10 ** d) / 10 ** d;
@@ -4380,9 +4384,12 @@ var MapInstance = class extends import_obsidian13.Component {
         return `${round(m, 2)} u`;
       }
       const activeId = meas == null ? void 0 : meas.customUnitId;
-      const def = (_d = activeId && defs.find((d) => d.id === activeId)) != null ? _d : defs[0];
+      const def = (_e = (_d = activeId && defs.find((d) => d.id === activeId)) != null ? _d : defs[0]) != null ? _e : null;
+      if (!def) {
+        return `${round(m, 2)} u`;
+      }
       const val = m / (def.metersPerUnit || 1);
-      const label = def.abbreviation || def.name || "u";
+      const label = typeof def.abbreviation === "string" && def.abbreviation.trim() || typeof def.name === "string" && def.name.trim() || "u";
       return `${round(val, 2)} ${label}`;
     }
     switch (unit) {
@@ -7691,7 +7698,7 @@ var MapInstance = class extends import_obsidian13.Component {
       var _a;
       (_a = this.zoomHud) == null ? void 0 : _a.classList.remove("zm-zoom-hud-visible");
       this.zoomHudTimer = null;
-    }, 5e3);
+    }, 1e3);
   }
   requestPanFrame() {
     if (this.panRAF != null) return;

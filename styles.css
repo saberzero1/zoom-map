@@ -134,7 +134,7 @@
   overflow: hidden;
   border-radius: 6px;
   pointer-events: none;
-  z-index: 40; /* above frame */
+  z-index: 60; /* above frame */
 }
 
 .zm-root.zm-root--framepad {
