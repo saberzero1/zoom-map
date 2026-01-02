@@ -47,6 +47,11 @@ interface ZoomMapSettingsExtended extends ZoomMapSettings {
   faFolderPath?: string; // Folder in vault containing SVG icon packs
 }
 
+export interface TravelPerDayConfig {
+  value: number;
+  unit: string; // must match preset.timeUnit (string)
+}
+
 interface LibraryFileData {
   version: 1;
   icons: IconProfile[];
@@ -123,6 +128,7 @@ const DEFAULT_SETTINGS: ZoomMapSettingsExtended = {
   faFolderPath: "ZoomMap/SVGs",
   customUnits: [],
   travelTimePresets: [],
+  travelPerDay: { value: 8, unit: "h" },
   defaultScaleLikeSticker: false,
   enableDrawing: false,
   preferActiveLayerInEditor: false,
@@ -668,6 +674,11 @@ export default class ZoomMapPlugin extends Plugin {
     ext.faFolderPath ??= "ZoomMap/SVGs";
     this.settings.customUnits ??= [];
 	this.settings.travelTimePresets ??= [];
+    this.settings.travelPerDay ??= { value: 8, unit: "h" };
+    if (!Number.isFinite(this.settings.travelPerDay.value) || this.settings.travelPerDay.value <= 0) {
+      this.settings.travelPerDay.value = 8;
+    }
+    this.settings.travelPerDay.unit = (this.settings.travelPerDay.unit ?? "").trim() || "h";
 	this.settings.enableTextLayers ??= false;
 	
     this.settings.enableSessionImageCache ??= false;
@@ -1333,6 +1344,84 @@ class ZoomMapSettingTab extends PluginSettingTab {
     renderCustomUnits();
 	
 	new Setting(containerEl).setName("Travel time (distance → time)").setHeading();
+	
+    // -------- Travel time per day (global config) --------
+    this.plugin.settings.travelPerDay ??= { value: 8, unit: "h" };
+    if (
+      !Number.isFinite(this.plugin.settings.travelPerDay.value) ||
+      this.plugin.settings.travelPerDay.value <= 0
+    ) {
+      this.plugin.settings.travelPerDay.value = 8;
+    }
+    this.plugin.settings.travelPerDay.unit =
+      (this.plugin.settings.travelPerDay.unit ?? "").trim() || "h";
+
+    const perDayWrap = containerEl.createDiv();
+
+    const collectTimeUnits = (): string[] => {
+      const presets = this.plugin.settings.travelTimePresets ?? [];
+      const set = new Set<string>();
+      for (const p of presets) {
+        const u = (p?.timeUnit ?? "").trim();
+        if (u) set.add(u);
+      }
+      return Array.from(set).sort((a, b) => a.localeCompare(b));
+    };
+	
+    const renderPerDay = () => {
+      perDayWrap.empty();
+
+      const cfg = this.plugin.settings.travelPerDay!;
+
+      const row = new Setting(perDayWrap)
+        .setName("Max travel time per day")
+        .setDesc("Must match the time unit of a travel preset to show travel days for that preset.");
+
+      row.addText((t) => {
+        t.inputEl.type = "number";
+        t.setPlaceholder("8");
+        t.setValue(String(cfg.value ?? 8));
+        t.onChange((v) => {
+          const n = Number(String(v).replace(",", "."));
+          if (!Number.isFinite(n) || n <= 0) return;
+          cfg.value = n;
+          void this.plugin.saveSettings();
+        });
+      });
+
+      row.addDropdown((d) => {
+        const units = collectTimeUnits();
+        if (units.length === 0) {
+          d.addOption(cfg.unit || "h", cfg.unit || "h");
+          d.setDisabled(true);
+          d.setValue(cfg.unit || "h");
+          return;
+        }
+
+        for (const u of units) d.addOption(u, u);
+
+        const current = (cfg.unit ?? "").trim();
+        const pick = units.includes(current) ? current : units[0];
+        cfg.unit = pick;
+        d.setValue(pick);
+
+        d.onChange((v) => {
+          cfg.unit = (v ?? "").trim();
+          void this.plugin.saveSettings();
+        });
+      });
+    };
+
+	let perDayRerenderTimer: number | null = null;
+	const scheduleRenderPerDay = () => {
+	  if (perDayRerenderTimer !== null) window.clearTimeout(perDayRerenderTimer);
+	  perDayRerenderTimer = window.setTimeout(() => {
+		perDayRerenderTimer = null;
+		renderPerDay();
+	  }, 250);
+	};
+
+	renderPerDay();
 
 	const travelWrap = containerEl.createDiv();
 
@@ -1421,6 +1510,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
 		timeUnit.oninput = () => {
 		  p.timeUnit = timeUnit.value.trim();
 		  void this.plugin.saveSettings();
+          scheduleRenderPerDay();
 		};
 
 		const del = grid.createEl("button", { cls: "zm-icon-btn", attr: { title: "Delete" } });
@@ -1445,9 +1535,11 @@ class ZoomMapSettingTab extends PluginSettingTab {
 		void this.plugin.saveSettings();
 		renderTravel();
 	  };
+	  renderPerDay();
 	};
 
 	renderTravel();
+	renderPerDay();
 
     /* ---------------- Collections ---------------- */
 
@@ -1550,7 +1642,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
 
     const libRow = new Setting(containerEl)
       .setName("Library file (icons + collections)")
-      .setDesc("Choose a JSON file in the vault to save/load your icon library and collections.");
+      .setDesc("Save/load your icons and collections to/from a JSON file.");
 
     libRow.addText((t) => {
       const ext = this.plugin.settings as ZoomMapSettingsExtended;

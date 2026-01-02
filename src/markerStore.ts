@@ -184,6 +184,7 @@ export interface MeasurementConfig {
   scales?: Record<string, number>;
   customUnitId?: string;
   travelTimePresetIds?: string[];
+  travelDaysEnabled?: boolean;
 }
 
 export interface MarkerFileData {
@@ -260,7 +261,8 @@ export class MarkerStore {
         metersPerPixel: undefined,
         scales: {},
         customUnitId: undefined,
-		travelTimePresetIds: [],
+        travelTimePresetIds: [],
+        travelDaysEnabled: false,
       },
       frame: undefined,
       pinSizeOverrides: {},
@@ -327,6 +329,9 @@ export class MarkerStore {
   if (!Array.isArray(parsed.measurement.travelTimePresetIds)) {
   parsed.measurement.travelTimePresetIds = [];
 }
+  if (typeof parsed.measurement.travelDaysEnabled !== "boolean") {
+    parsed.measurement.travelDaysEnabled = false;
+  }
 
   // Per-map pin size overrides
   parsed.pinSizeOverrides ??= {};

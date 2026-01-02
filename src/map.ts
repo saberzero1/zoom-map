@@ -146,6 +146,11 @@ export interface TravelTimePreset {
   timeUnit: string;
 }
 
+export interface TravelPerDayConfig {
+  value: number;
+  unit: string;
+}
+
 export interface ZoomMapSettings {
   icons: IconProfile[];
   defaultIconKey: string;
@@ -171,6 +176,7 @@ export interface ZoomMapSettings {
   preferActiveLayerInEditor?: boolean;
   enableTextLayers?: boolean;
   travelTimePresets?: TravelTimePreset[];
+  travelPerDay?: TravelPerDayConfig;
   
   // Session image cache
   enableSessionImageCache?: boolean;
@@ -2804,6 +2810,23 @@ private async applyViewEditorResult(cfg: ViewEditorConfig): Promise<void> {
 
     const presets = this.plugin.settings.travelTimePresets ?? [];
     const out: string[] = [];
+	
+    const getTravelPerDay = (): { value: number | null; unit: string } => {
+      const cfg = this.plugin.settings.travelPerDay;
+      if (!cfg) return { value: null, unit: "" };
+
+      const value =
+        Number.isFinite(cfg.value) && cfg.value > 0 ? cfg.value : null;
+      const unit = (cfg.unit ?? "").trim();
+
+      return { value, unit };
+    };
+
+    const perDay = getTravelPerDay();
+    const perDayValue = perDay.value;
+    const perDayUnit = perDay.unit;
+
+    const showDays = !!this.data?.measurement?.travelDaysEnabled;
 
     for (const p of presets) {
       if (!p?.id || !selected.has(p.id)) continue;
@@ -2823,6 +2846,38 @@ private async applyViewEditorResult(cfg: ViewEditorConfig): Promise<void> {
 
       const t = (distanceMeters / refMeters) * p.timeValue;
       out.push(`Time (${name}): ${this.formatTravelTimeNumber(t)} ${unit}`);
+      if (showDays) {
+        if (!perDayValue || !perDayUnit) {
+          out.push("Travel days: not configured (set per-day unit/value in settings)");
+          continue;
+        }
+
+        const presetUnitNorm = unit.trim().toLowerCase();
+        const perDayUnitNorm = perDayUnit.trim().toLowerCase();
+
+        if (presetUnitNorm !== perDayUnitNorm) {
+          out.push(`Travel days: unit mismatch (preset: ${unit}, per-day: ${perDayUnit})`);
+          continue;
+        }
+
+        const total = t;
+        const fullDays = Math.floor(total / perDayValue);
+        const rest = total - fullDays * perDayValue;
+
+        // pretty formatting
+        const restAbs = Math.abs(rest);
+        if (restAbs < 1e-6) {
+          out.push(`Travel days (${perDayValue} ${perDayUnit}/day): ${fullDays}d`);
+        } else if (fullDays <= 0) {
+          out.push(
+            `Travel days (${perDayValue} ${perDayUnit}/day): 0d + ${this.formatTravelTimeNumber(rest)} ${unit}`,
+          );
+        } else {
+          out.push(
+            `Travel days (${perDayValue} ${perDayUnit}/day): ${fullDays}d + ${this.formatTravelTimeNumber(rest)} ${unit}`,
+          );
+        }
+      }
     }
 
     return out;
@@ -4131,6 +4186,38 @@ private onContextMenuViewport(e: MouseEvent): void {
               },
             },
           ];
+		  
+    // --- Travel days toggle (per map) ---
+    travelTimeItems.push({ type: "separator" });
+
+    {
+      const enabled = !!this.data.measurement?.travelDaysEnabled;
+
+      travelTimeItems.push({
+        label: "Show travel days",
+        mark: enabled ? "check" : "x",
+        markColor: enabled ? "var(--text-accent)" : "var(--text-muted)",
+        action: (rowEl) => {
+          this.ensureMeasurement();
+          if (!this.data?.measurement) return;
+
+          const next = !this.data.measurement.travelDaysEnabled;
+          this.data.measurement.travelDaysEnabled = next;
+
+          void this.saveDataSoon();
+          this.updateMeasureHud();
+
+          const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
+          if (chk) {
+            chk.textContent = next ? "✓" : "×";
+            chk.style.color = next
+              ? "var(--text-accent)"
+              : "var(--text-muted)";
+          }
+        },
+        checked: false,
+      });
+    }
 
     items.push(
       { type: "separator" },
