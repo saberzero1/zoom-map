@@ -114,6 +114,16 @@ export class PreferencesModal extends Modal {
           await this.plugin.saveSettings();
         });
       });
+	  
+    new Setting(contentEl)
+      .setName("Enable measure pro (terrain segments)")
+      .setDesc("Allows assigning terrain factors per measurement segment for travel time.")
+      .addToggle((toggle) => {
+        toggle.setValue(!!this.plugin.settings.enableMeasurePro).onChange(async (value) => {
+          this.plugin.settings.enableMeasurePro = value;
+          await this.plugin.saveSettings();
+        });
+      });
 
     new Setting(contentEl)
       .setName('Pins: "scale like sticker" by default')

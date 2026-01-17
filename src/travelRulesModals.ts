@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting, TFile, normalizePath } from "obsidian";
 import type { App } from "obsidian";
 import type ZoomMapPlugin from "./main";
-import type { TravelRulesPack, CustomUnitDef, TravelTimePreset, TravelPerDayConfig } from "./map";
+import type { TravelRulesPack, CustomUnitDef, TerrainDef, TravelTimePreset, TravelPerDayConfig } from "./map";
 import { JsonFileSuggestModal } from "./jsonFileSuggest";
 
 type DoneCb = () => void;
@@ -47,10 +47,16 @@ function isTravelTimePreset(x: unknown): x is TravelTimePreset {
   return true;
 }
 
+function isTerrainDef(x: unknown): x is TerrainDef {
+  if (!isRecord(x)) return false;
+  return typeof x.id === "string" && typeof x.name === "string" && typeof x.factor === "number";
+}
+
 function isTravelRulesPack(x: unknown): x is TravelRulesPack {
   if (!isRecord(x)) return false;
   if (typeof x.id !== "string" || typeof x.name !== "string") return false;
   if (!Array.isArray(x.customUnits) || !x.customUnits.every(isCustomUnitDef)) return false;
+  if (!Array.isArray(x.terrains) || !x.terrains.every(isTerrainDef)) return false;
   if (!Array.isArray(x.travelTimePresets) || !x.travelTimePresets.every(isTravelTimePreset)) return false;
   if (!isTravelPerDayConfig(x.travelPerDay)) return false;
   if ("enabled" in x && typeof x.enabled !== "boolean") return false;
@@ -118,6 +124,7 @@ export class TravelRulesManagerModal extends Modal {
       left.createEl("div", {
         text:
           `${p.customUnits?.length ?? 0} custom units` +
+		  ` • ${p.terrains?.length ?? 0} terrains` +
           ` • ${p.travelTimePresets?.length ?? 0} travel presets`,
       }).addClass("zoommap-collections-meta");
 
@@ -168,6 +175,7 @@ export class TravelRulesManagerModal extends Modal {
         name: `Travel pack ${packs.length + 1}`,
         enabled: packs.length === 0,
         customUnits: [],
+		terrains: [{ id: genId("ter"), name: "Normal", factor: 1 }],
         travelTimePresets: [],
         travelPerDay: { value: 8, unit: "h" },
       });
@@ -270,6 +278,7 @@ class TravelRulesPackEditorModal extends Modal {
     this.original = pack;
     this.working = deepClone(pack);
     this.working.customUnits ??= [];
+	this.working.terrains ??= [];
     this.working.travelTimePresets ??= [];
     this.working.travelPerDay ??= { value: 8, unit: "h" };
     this.onDone = onDone;
@@ -415,6 +424,54 @@ class TravelRulesPackEditorModal extends Modal {
       };
     };
     renderUnits();
+	
+    // Terrains
+    contentEl.createEl("h3", { text: "Terrains" });
+    const terrainsWrap = contentEl.createDiv();
+    const renderTerrains = () => {
+      terrainsWrap.empty();
+      const terrains = (this.working.terrains ??= []);
+
+      if (terrains.length === 0) {
+        terrainsWrap.createEl("div", { text: "No terrains." }).addClass("zoommap-muted");
+      }
+
+      terrains.forEach((t, idx) => {
+        const row = terrainsWrap.createDiv({ cls: "zoommap-custom-unit-row" });
+
+        const nameInput = row.createEl("input", { type: "text" });
+        nameInput.classList.add("zm-cu-name");
+        nameInput.placeholder = "Name";
+        nameInput.value = t.name ?? "";
+        nameInput.oninput = () => (t.name = nameInput.value.trim());
+
+        const factorInput = row.createEl("input", { type: "number" });
+        factorInput.classList.add("zm-cu-factor");
+        factorInput.placeholder = "1";
+        factorInput.value = String(t.factor ?? 1);
+        factorInput.oninput = () => {
+          const n = Number(String(factorInput.value).replace(",", "."));
+          if (Number.isFinite(n) && n > 0) t.factor = n;
+        };
+
+        const hint = row.createEl("div");
+        hint.addClass("zoommap-muted");
+        hint.setText("Speed factor");
+
+        const delBtn = row.createEl("button", { text: "Delete" });
+        delBtn.onclick = () => {
+          terrains.splice(idx, 1);
+          renderTerrains();
+        };
+      });
+
+      const addBtn = terrainsWrap.createEl("button", { text: "Add terrain" });
+      addBtn.onclick = () => {
+        terrains.push({ id: genId("ter"), name: "Road", factor: 2 });
+        renderTerrains();
+      };
+    };
+    renderTerrains();	
 
     // Travel presets
     contentEl.createEl("h3", { text: "Travel time presets" });
@@ -532,6 +589,7 @@ class TravelRulesPackEditorModal extends Modal {
       this.original.name = this.working.name;
       this.original.enabled = this.working.enabled;
       this.original.customUnits = this.working.customUnits ?? [];
+	  this.original.terrains = this.working.terrains ?? [];
       this.original.travelTimePresets = this.working.travelTimePresets ?? [];
       this.original.travelPerDay = this.working.travelPerDay ?? { value: 8, unit: "h" };
       this.close();

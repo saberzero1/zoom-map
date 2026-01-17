@@ -17,7 +17,7 @@ export interface DrawLayer {
   boundBase?: string;
 }
 
-export type DrawingKind = "polygon" | "rect" | "circle";
+export type DrawingKind = "polygon" | "polyline" | "rect" | "circle";
 
 export type FillPatternKind = "none" | "solid" | "striped" | "cross" | "wavy";
 
@@ -41,6 +41,9 @@ export interface DrawingStyle {
 
   // Optional label
   label?: string;
+  
+  arrowEnd?: boolean;
+  distanceLabel?: boolean;
 }
 
 export interface Drawing {
@@ -52,6 +55,7 @@ export interface Drawing {
   rect?: { x0: number; y0: number; x1: number; y1: number };
   circle?: { cx: number; cy: number; r: number };
   polygon?: { x: number; y: number }[];
+  polyline?: { x: number; y: number }[];
 
   style: DrawingStyle;
 
@@ -101,6 +105,8 @@ export interface TextLayer {
 
 export type MarkerKind = "pin" | "sticker" | "swap";
 
+export type PingDistanceUnit = "m" | "km" | "mi" | "ft" | "custom";
+
 export type AnchorSpace = "world" | "viewport";
 
 export interface Marker {
@@ -138,6 +144,13 @@ export interface Marker {
   
   // Per-marker override links for swap pins (frameIndex -> link)
   swapLinks?: Record<number, string>;
+  
+  // Ping pins (special markers that create/update a ping note) 
+  pingPresetId?: string;
+  pingRadius?: number;
+  pingRadiusUnit?: PingDistanceUnit;
+  pingRadiusCustomUnitId?: string;
+  pingNotePath?: string; // vault path of the generated ping note
 
   // Optional: per-pin zoom range (undefined → always visible)
   minZoom?: number;

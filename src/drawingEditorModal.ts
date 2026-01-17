@@ -29,11 +29,25 @@ export class DrawingEditorModal extends Modal {
     } as DrawingStyle;
 
     const s = this.working.style;
+	const isPolyline = this.working.kind === "polyline";
 
     // Defaults
     if (!s.strokeColor) s.strokeColor = "#ff0000";
     if (!Number.isFinite(s.strokeWidth) || s.strokeWidth <= 0) s.strokeWidth = 2;
     if (typeof s.strokeOpacity !== "number") s.strokeOpacity = 1;
+	
+    if (isPolyline) {
+      if (typeof s.arrowEnd !== "boolean") s.arrowEnd = true;
+      if (typeof s.distanceLabel !== "boolean") s.distanceLabel = true;
+      delete s.fillColor;
+      delete s.fillOpacity;
+      delete s.fillPattern;
+      delete s.fillPatternAngle;
+      delete s.fillPatternSpacing;
+      delete s.fillPatternStrokeWidth;
+      delete s.fillPatternOpacity;
+      return;
+    }
 
     if (!s.fillColor) s.fillColor = "#ff0000";
     if (typeof s.fillOpacity !== "number") s.fillOpacity = 0.15;
@@ -57,19 +71,21 @@ export class DrawingEditorModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Edit drawing" });
+    const isPolyline = this.working.kind === "polyline";
+    contentEl.createEl("h2", { text: isPolyline ? "Edit polyline" : "Edit drawing" });
 
     const style = this.working.style;
-
-    // Label
-    new Setting(contentEl).setName("Label").addText((t) => {
-      t.setPlaceholder("Label");
-      t.setValue(style.label ?? "");
-      t.inputEl.classList.add("zoommap-drawing-editor__label-input");
-      t.onChange((v) => {
-        style.label = v.trim() || undefined;
+	
+    if (!isPolyline) {
+      new Setting(contentEl).setName("Label").addText((t) => {
+        t.setPlaceholder("Label");
+        t.setValue(style.label ?? "");
+        t.inputEl.classList.add("zoommap-drawing-editor__label-input");
+        t.onChange((v) => {
+          style.label = v.trim() || undefined;
+        });
       });
-    });
+    }
 
     // Stroke heading
     const strokeHeading = contentEl.createDiv({
@@ -158,6 +174,56 @@ export class DrawingEditorModal extends Modal {
         style.strokeOpacity = clamped / 100;
       });
     });
+	
+    if (isPolyline) {
+      new Setting(contentEl)
+        .setName("Arrow at end")
+        .addToggle((tg) => {
+          tg.setValue(!!style.arrowEnd).onChange((on) => {
+            style.arrowEnd = on ? true : undefined;
+          });
+        });
+
+      new Setting(contentEl)
+        .setName("Distance label")
+        .setDesc("Uses the current map scale + unit settings.")
+        .addToggle((tg) => {
+          tg.setValue(!!style.distanceLabel).onChange((on) => {
+            style.distanceLabel = on ? true : undefined;
+          });
+        });
+
+      const footer = contentEl.createDiv({ cls: "zoommap-modal-footer" });
+      const saveBtn = footer.createEl("button", { text: "Save" });
+      const deleteBtn = footer.createEl("button", { text: "Delete" });
+      const cancelBtn = footer.createEl("button", { text: "Cancel" });
+
+      saveBtn.onclick = () => {
+        this.normalizeStyle(this.working);
+        this.working.id = this.original.id;
+        this.working.layerId = this.original.layerId;
+        this.working.kind = this.original.kind;
+        this.working.rect = this.original.rect;
+        this.working.circle = this.original.circle;
+        this.working.polygon = this.original.polygon;
+        this.working.polyline = this.original.polyline;
+
+        this.close();
+        this.onResult({ action: "save", drawing: this.working });
+      };
+
+      deleteBtn.onclick = () => {
+        this.close();
+        this.onResult({ action: "delete" });
+      };
+
+      cancelBtn.onclick = () => {
+        this.close();
+        this.onResult({ action: "cancel" });
+      };
+
+      return;
+    }
 
     // Fill heading
     const fillHeading = contentEl.createDiv({
@@ -304,7 +370,7 @@ export class DrawingEditorModal extends Modal {
     const cancelBtn = footer.createEl("button", { text: "Cancel" });
 
     saveBtn.onclick = () => {
-      this.normalizeStyle(this.working.style);
+      this.normalizeStyle(this.working);
 
       // Preserve geometry metadata from the original
       this.working.id = this.original.id;
@@ -313,6 +379,7 @@ export class DrawingEditorModal extends Modal {
       this.working.rect = this.original.rect;
       this.working.circle = this.original.circle;
       this.working.polygon = this.original.polygon;
+	  this.working.polyline = this.original.polyline;
 
       this.close();
       this.onResult({ action: "save", drawing: this.working });
@@ -355,7 +422,8 @@ export class DrawingEditorModal extends Modal {
     return String(Math.round(value * 100));
   }
 
-  private normalizeStyle(style: Drawing["style"]): void {
+  private normalizeStyle(drawing: Drawing): void {
+    const style = drawing.style;
     if (!style.strokeColor) style.strokeColor = "#ff0000";
     if (!Number.isFinite(style.strokeWidth) || style.strokeWidth <= 0) {
       style.strokeWidth = 2;
@@ -364,6 +432,21 @@ export class DrawingEditorModal extends Modal {
     if (typeof style.strokeOpacity === "number") {
       style.strokeOpacity = this.clamp(style.strokeOpacity, 0, 1);
       if (style.strokeOpacity === 1) delete style.strokeOpacity;
+    }
+	
+    if (drawing.kind === "polyline") {
+      if (!style.arrowEnd) delete style.arrowEnd;
+      if (!style.distanceLabel) delete style.distanceLabel;
+
+      delete style.fillPattern;
+      delete style.fillColor;
+      delete style.fillOpacity;
+      delete style.fillPatternSpacing;
+      delete style.fillPatternAngle;
+      delete style.fillPatternStrokeWidth;
+      delete style.fillPatternOpacity;
+      delete style.label;
+      return;
     }
 
     const pattern: FillPatternKind =

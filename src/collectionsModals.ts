@@ -8,6 +8,7 @@ import type {
   StickerPreset,
   SwapPinPreset,
   SwapPinFrame,
+  PingPreset,
 } from "./map";
 
 function deepClone<T>(x: T): T {
@@ -52,11 +53,13 @@ export class CollectionEditorModal extends Modal {
       favorites: [],
       stickers: [],
       swapPins: [],
+	  pingPins: [],
     };
     this.working.include.pinKeys = this.working.include.pinKeys ?? [];
     this.working.include.favorites = this.working.include.favorites ?? [];
     this.working.include.stickers = this.working.include.stickers ?? [];
     this.working.include.swapPins = this.working.include.swapPins ?? [];
+	this.working.include.pingPins = this.working.include.pingPins ?? [];
     this.onDone = onDone;
   }
 
@@ -124,7 +127,10 @@ export class CollectionEditorModal extends Modal {
         text: "Select pins from the icon library:",
       });
 
-      const lib = this.plugin.settings.icons ?? [];
+      const selected = new Set(this.working.include.pinKeys ?? []);
+      const lib = (this.plugin.settings.icons ?? [])
+        .filter((ico) => ico.inCollections !== false || selected.has(ico.key))
+        .sort((a, b) => String(a.key ?? "").localeCompare(String(b.key ?? ""), undefined, { sensitivity: "base", numeric: true }));
       if (lib.length === 0) {
         const none = pinWrap.createEl("div", {
           text: "No icons in library yet.",
@@ -202,9 +208,12 @@ export class CollectionEditorModal extends Modal {
         };
 
         addOpt("", "(default)");
-        (this.plugin.settings.icons ?? []).forEach((ico) =>
-          addOpt(ico.key, ico.key),
-        );
+        {
+          const pool = (this.plugin.settings.icons ?? [])
+            .filter((ico) => ico.inCollections !== false || ico.key === (p.iconKey ?? ""))
+            .sort((a, b) => String(a.key ?? "").localeCompare(String(b.key ?? ""), undefined, { sensitivity: "base", numeric: true }));
+          pool.forEach((ico) => addOpt(ico.key, ico.key));
+        }
 
         iconSel.value = p.iconKey ?? "";
         iconSel.onchange = () => {
@@ -378,6 +387,62 @@ export class CollectionEditorModal extends Modal {
       };
     };
     renderSwaps();
+	
+    // Party pins (internal type is "ping")
+    contentEl.createEl("h3", { text: "Party pins" });
+
+    const pingWrap = contentEl.createDiv();
+    const renderPings = () => {
+      pingWrap.empty();
+      const pings = (this.working.include.pingPins ??= []);
+
+      if (pings.length === 0) {
+        pingWrap.createEl("div", { text: "No party pins in this collection." }).addClass("zoommap-muted");
+      }
+
+      pings.forEach((pp, idx) => {
+        const row = pingWrap.createDiv({ cls: "zoommap-collection-sticker-row" });
+
+        const name = row.createEl("input", { type: "text" });
+        name.value = pp.name ?? "";
+        name.oninput = () => { pp.name = name.value.trim(); };
+
+        const editBtn = row.createEl("button", { text: "Edit…" });
+        editBtn.onclick = () => {
+          new PingPresetEditorModal(this.app, this.plugin, pp, (updated) => {
+            Object.assign(pp, updated);
+            renderPings();
+          }).open();
+        };
+
+        const delBtn = row.createEl("button", { text: "Delete" });
+        delBtn.onclick = () => {
+          pings.splice(idx, 1);
+          renderPings();
+        };
+      });
+
+      const addBtn = pingWrap.createEl("button", { text: "Add party pin" });
+      addBtn.onclick = () => {
+        const id = `ping-${Math.random().toString(36).slice(2, 8)}`;
+        const pp: PingPreset = {
+          id,
+          name: `Ping ${pings.length + 1}`,
+          iconKey: undefined,
+          layerName: "Pings",
+          distances: [2, 5, 10],
+          unit: "km",
+          customUnitId: undefined,
+          travelPackId: (this.plugin.settings.travelRulesPacks ?? [])[0]?.id,
+          noteFolder: "ZoomMap/Pings",
+          filterTags: [],
+          filterProps: {},
+        };
+        pings.push(pp);
+        renderPings();
+      };
+    };
+    renderPings();
 
     // Footer
     const footer = contentEl.createDiv({ cls: "zoommap-modal-footer" });
@@ -504,7 +569,9 @@ export class SwapFramesEditorModal extends Modal {
         });
 
         const iconSel = row.createEl("select");
-        const icons = this.plugin.settings.icons ?? [];
+        const icons = (this.plugin.settings.icons ?? [])
+          .filter((ico) => ico.inCollections !== false || ico.key === fr.iconKey)
+          .sort((a, b) => String(a.key ?? "").localeCompare(String(b.key ?? ""), undefined, { sensitivity: "base", numeric: true }));
         icons.forEach((ico) => {
           const opt = document.createElement("option");
           opt.value = ico.key;
@@ -651,5 +718,166 @@ export class SwapFramesEditorModal extends Modal {
     });
 
     hide();
+  }
+}
+
+class PingPresetEditorModal extends Modal {
+  private plugin: ZoomMapPlugin;
+  private working: PingPreset;
+  private onSave: (preset: PingPreset) => void;
+
+  constructor(app: App, plugin: ZoomMapPlugin, preset: PingPreset, onSave: (preset: PingPreset) => void) {
+    super(app);
+    this.plugin = plugin;
+    this.working = deepClone(preset);
+    this.onSave = onSave;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Party preset" });
+
+    new Setting(contentEl).setName("Name").addText((t) => {
+      t.setValue(this.working.name ?? "");
+      t.onChange((v) => { this.working.name = v.trim(); });
+    });
+
+    new Setting(contentEl).setName("Icon").addDropdown((d) => {
+      d.addOption("", "(default)");
+      {
+        const pool = (this.plugin.settings.icons ?? [])
+          .filter((ico) => ico.inCollections !== false || ico.key === (this.working.iconKey ?? ""))
+          .sort((a, b) => String(a.key ?? "").localeCompare(String(b.key ?? ""), undefined, { sensitivity: "base", numeric: true }));
+        for (const ico of pool) d.addOption(ico.key, ico.key);
+      }
+      d.setValue(this.working.iconKey ?? "");
+      d.onChange((v) => { this.working.iconKey = v || undefined; });
+    });
+
+    new Setting(contentEl).setName("Layer name (optional)").addText((t) => {
+      t.setPlaceholder("Pings");
+      t.setValue(this.working.layerName ?? "");
+      t.onChange((v) => { this.working.layerName = v.trim() || undefined; });
+    });
+
+    const packs = (this.plugin.settings.travelRulesPacks ?? []);
+    new Setting(contentEl)
+      .setName("Travel pack")
+      .setDesc("Used to select custom units for party radius.")
+      .addDropdown((d) => {
+        d.addOption("", "(none)");
+        for (const p of packs) d.addOption(p.id, p.name || p.id);
+        d.setValue(this.working.travelPackId ?? "");
+        d.onChange((v) => { this.working.travelPackId = v || undefined; this.renderUnitSetting(); });
+      });
+
+    contentEl.createEl("div", { text: "" });
+    this.renderUnitSetting();
+
+    new Setting(contentEl)
+      .setName("Distances (comma separated)")
+      .setDesc("Example: 2, 5, 10")
+      .addText((t) => {
+        t.setValue((this.working.distances ?? []).join(", "));
+        t.onChange((v) => {
+          const nums = v.split(",")
+            .map((s) => Number(s.trim().replace(",", ".")))
+            .filter((n) => Number.isFinite(n) && n > 0);
+          this.working.distances = nums.length ? nums : [2, 5, 10];
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Party note folder")
+      .setDesc("Vault folder where party pin notes are created.")
+      .addText((t) => {
+        t.setPlaceholder("Zoommap/pings");
+        t.setValue(this.working.noteFolder ?? "");
+        t.onChange((v) => { this.working.noteFolder = v.trim() || undefined; });
+      });
+
+    new Setting(contentEl)
+      .setName("Filter tags (optional, comma separated)")
+      .setDesc("These tags are applied as or filter in the embedded bases view.")
+      .addText((t) => {
+        t.setPlaceholder("Npc, shop, questgiver");
+        t.setValue((this.working.filterTags ?? []).join(", "));
+        t.onChange((v) => {
+          const tags = v.split(",").map((s) => s.trim().replace(/^#/, "")).filter(Boolean);
+          this.working.filterTags = tags;
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Filter properties (optional)")
+      .setDesc('One per line: key=value (and filter). Example: type=npc')
+      .addTextArea((a) => {
+        const props = this.working.filterProps ?? {};
+        a.setValue(Object.entries(props).map(([k, v]) => `${k}=${v}`).join("\n"));
+        a.onChange((v) => {
+          const next: Record<string, string> = {};
+          for (const line of v.split("\n")) {
+            const s = line.trim();
+            if (!s) continue;
+            const i = s.indexOf("=");
+            if (i < 1) continue;
+            const k = s.slice(0, i).trim();
+            const val = s.slice(i + 1).trim();
+            if (!k || !val) continue;
+            next[k] = val;
+          }
+          this.working.filterProps = next;
+        });
+      });
+
+    const footer = contentEl.createDiv({ cls: "zoommap-modal-footer" });
+    footer.createEl("button", { text: "Save" }).onclick = () => {
+      this.close();
+      this.onSave(this.working);
+    };
+    footer.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+  }
+
+  private renderUnitSetting(): void {
+    const { contentEl } = this;
+    // remove any previous unit block (simple approach: clear + rebuild would be too much)
+    const existing = contentEl.querySelector(".zm-ping-unit-setting");
+    existing?.remove();
+
+    const wrap = contentEl.createDiv({ cls: "zm-ping-unit-setting" });
+
+    const pack = (this.plugin.settings.travelRulesPacks ?? []).find((p) => p.id === this.working.travelPackId);
+    const customs = (pack?.customUnits ?? []).slice().sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));
+
+    const setting = new Setting(wrap).setName("Unit");
+    setting.addDropdown((d) => {
+      d.addOption("m", "M");
+      d.addOption("km", "Km");
+      d.addOption("mi", "Mi");
+      d.addOption("ft", "Ft");
+      for (const cu of customs) {
+        const label = cu.abbreviation ? `${cu.name} (${cu.abbreviation})` : cu.name;
+        d.addOption(`custom:${cu.id}`, label);
+      }
+
+      const cur = this.working.unit === "custom" ? `custom:${this.working.customUnitId ?? ""}` : this.working.unit;
+      const has = Array.from(d.selectEl.options).some((o) => o.value === cur);
+      d.setValue(has ? cur : "km");
+
+      d.onChange((v) => {
+        if (v.startsWith("custom:")) {
+          this.working.unit = "custom";
+          this.working.customUnitId = v.slice("custom:".length) || undefined;
+        } else {
+          if (v === "m" || v === "km" || v === "mi" || v === "ft") {
+            this.working.unit = v;
+          } else {
+            this.working.unit = "km";
+          }
+          this.working.customUnitId = undefined;
+        }
+      });
+    });
   }
 }

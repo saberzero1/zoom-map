@@ -4,6 +4,7 @@ import { generateId, MarkerStore } from "./markerStore";
 import type {
   Marker,
   MarkerFileData,
+  PingDistanceUnit,
   ImageOverlay,
   BaseImage,
   MarkerLayer,
@@ -29,6 +30,7 @@ import { SwapFramesEditorModal } from "./collectionsModals";
 import { TextLayerStyleModal } from "./textLayerStyleModal";
 import { SvgRasterExportModal } from "./svgRasterExportModal";
 import { SwapLinksEditorModal, type SwapLinksEditorResult } from "./swapLinksEditorModal";
+import { MeasureTerrainModal, type MeasureTerrainSegment } from "./measureTerrainModal";
 import type { ScaleUnitValue } from "./scaleCalibrateModal";
 
 /* ===== Collections (base-bound) ===== */
@@ -39,6 +41,29 @@ export interface MarkerPreset {
   layerName?: string;
   openEditor: boolean;
   linkTemplate?: string;
+}
+
+// ===== Ping pins =====
+export interface PingPreset {
+  id: string;
+  name: string;
+  iconKey?: string;
+  layerName?: string;
+
+  // radius menu entries (e.g. [2,5,10] with unit "km" or custom)
+  distances: number[];
+  unit: PingDistanceUnit; // "m" | "km" | "mi" | "ft" | "custom"
+  customUnitId?: string;  // required when unit === "custom"
+
+  // used for editing: which travel pack provides the custom units
+  travelPackId?: string;
+
+  // ping note creation
+  noteFolder?: string; // vault folder path, e.g. "Pings/MyMap"
+
+  // optional extra filters for the embedded Bases view
+  filterTags?: string[];                 // OR tags; e.g. ["npc","shop"]
+  filterProps?: Record<string, string>;  // AND props; e.g. { type: "npc" }
 }
 
 export interface StickerPreset {
@@ -80,6 +105,7 @@ export interface BaseCollection {
     favorites: MarkerPreset[];
     stickers: StickerPreset[];
     swapPins?: SwapPinPreset[];
+	pingPins?: PingPreset[];
   };
   options?: BaseCollectionOptions; // deprecated
 }
@@ -154,11 +180,18 @@ export interface TravelPerDayConfig {
   unit: string;
 }
 
+export interface TerrainDef {
+  id: string;
+  name: string;
+  factor: number;
+}
+
 export interface TravelRulesPack {
   id: string;
   name: string;
   enabled?: boolean;
   customUnits: CustomUnitDef[];
+  terrains: TerrainDef[];
   travelTimePresets: TravelTimePreset[];
   travelPerDay: TravelPerDayConfig;
 }
@@ -187,6 +220,7 @@ export interface ZoomMapSettings {
   enableDrawing?: boolean;
   preferActiveLayerInEditor?: boolean;
   enableTextLayers?: boolean;
+  enableMeasurePro?: boolean;
   travelTimePresets?: TravelTimePreset[];
   travelPerDay?: TravelPerDayConfig;
   travelRulesPacks?: TravelRulesPack[];
@@ -204,6 +238,11 @@ interface Point { x: number; y: number; }
 
 type LayerTriState = "visible" | "locked" | "hidden";
 
+const PING_TOOLTIP_BEGIN = "<!-- ZOOMMAP-PING-TOOLTIP:BEGIN -->";
+const PING_TOOLTIP_END = "<!-- ZOOMMAP-PING-TOOLTIP:END -->";
+const PING_RELATED_BEGIN = "<!-- ZOOMMAP-PING-RELATED:BEGIN -->";
+const PING_RELATED_END = "<!-- ZOOMMAP-PING-RELATED:END -->";
+
 /* ===== Helpers ===== */
 function clamp(n: number, min: number, max: number): number {
   return Math.min(Math.max(n, min), max);
@@ -218,6 +257,32 @@ function setCssProps(el: HTMLElement, props: Record<string, string | null>): voi
     else el.style.setProperty(key, value);
   }
 }
+
+function stableStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+
+  const norm = (v: unknown): unknown => {
+    if (v && typeof v === "object") {
+      if (seen.has(v)) return null;
+      seen.add(v);
+
+      if (Array.isArray(v)) return v.map(norm);
+
+      const obj = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(obj).sort()) out[k] = norm(obj[k]);
+      return out;
+    }
+    return v;
+  };
+
+  return JSON.stringify(norm(value));
+}
+
+function stableEqual(a: unknown, b: unknown): boolean {
+  return stableStringify(a) === stableStringify(b);
+}
+
 function isImageBitmapLike(x: unknown): x is ImageBitmap {
   return typeof x === "object" && x !== null && "close" in x && typeof (x as { close: unknown }).close === "function";
 }
@@ -368,6 +433,9 @@ export class MapInstance extends Component {
   private textOutsideCleanup: (() => void) | null = null;
 
   private textMeasureSpan: HTMLSpanElement | null = null;
+  
+  // Ping pins (notes + Bases)
+  private pingUpdateTimer: number | null = null;
 
   private cfg: ZoomMapConfig;
   private store: MarkerStore | NoteMarkerStore;
@@ -410,6 +478,7 @@ export class MapInstance extends Component {
   private measuring = false;
   private measurePts: Point[] = [];
   private measurePreview: Point | null = null;
+  private measureSegTerrainIds: string[] = [];
 
   // Calibration state
   private calibrating = false;
@@ -1200,6 +1269,11 @@ export class MapInstance extends Component {
       new Notice(
         "Draw circle: click center, move the mouse, click radius point. Press esc to cancel.",
         5000,
+      );
+    } else if (kind === "polyline") {
+      new Notice(
+        "Draw polyline: click to add points, move the mouse for preview, double-click or right-click to finish. Press esc to cancel.",
+        7000,
       );
     } else if (kind === "polygon") {
       new Notice(
@@ -3018,7 +3092,99 @@ export class MapInstance extends Component {
   private clearMeasure(): void {
     this.measurePts = [];
     this.measurePreview = null;
+	this.measureSegTerrainIds = [];
     this.renderMeasure();
+  }
+  
+  private ensureMeasureProTerrainIds(): void {
+    if (!this.plugin.settings.enableMeasurePro) return;
+
+    const want = Math.max(0, this.measurePts.length - 1);
+    const terrains = this.plugin.getActiveTerrains();
+    const def = terrains[0]?.id ?? "";
+
+    while (this.measureSegTerrainIds.length < want) this.measureSegTerrainIds.push(def);
+    if (this.measureSegTerrainIds.length > want) this.measureSegTerrainIds.length = want;
+  }
+
+  private terrainFactor(id: string): number {
+    if (!id) return 1;
+    const t = this.plugin.getActiveTerrains().find((x) => x.id === id);
+    return t ? t.factor : 1;
+  }
+
+  private computeMeasureSegmentsMeters(includePreview: boolean): { meters: number; terrainId: string }[] | null {
+    const mpp = this.getMetersPerPixel();
+    if (!mpp) return null;
+
+    const pts: Point[] = [...this.measurePts];
+    const terrains = [...this.measureSegTerrainIds];
+
+    if (includePreview && this.measurePreview && pts.length >= 1) {
+      pts.push(this.measurePreview);
+      terrains.push(terrains[terrains.length - 1] ?? terrains[0] ?? "");
+    }
+
+    if (pts.length < 2) return null;
+
+    const out: { meters: number; terrainId: string }[] = [];
+    for (let i = 1; i < pts.length; i += 1) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const dx = (b.x - a.x) * this.imgW;
+      const dy = (b.y - a.y) * this.imgH;
+      const px = Math.hypot(dx, dy);
+      out.push({ meters: px * mpp, terrainId: terrains[i - 1] ?? "" });
+    }
+
+    return out;
+  }
+
+  private openMeasureTerrainModal(): void {
+    if (!this.plugin.settings.enableMeasurePro) return;
+    if (this.measurePts.length < 2) {
+      new Notice("Measure terrains: add at least 2 points first.", 2500);
+      return;
+    }
+
+    const terrains = this.plugin.getActiveTerrains();
+    if (terrains.length === 0) {
+      new Notice("No terrains configured. Add terrains in settings → travel rules.", 4500);
+      return;
+    }
+
+    this.ensureMeasureProTerrainIds();
+
+    const unit = this.data?.measurement?.displayUnit ?? "auto-metric";
+    const mpp = this.getMetersPerPixel();
+    if (!mpp && unit !== "custom") {
+      new Notice("Scale is not calibrated.", 2500);
+      return;
+    }
+
+    const segments: MeasureTerrainSegment[] = [];
+    for (let i = 1; i < this.measurePts.length; i += 1) {
+      const a = this.measurePts[i - 1];
+      const b = this.measurePts[i];
+      const dx = (b.x - a.x) * this.imgW;
+      const dy = (b.y - a.y) * this.imgH;
+      const px = Math.hypot(dx, dy);
+
+      const label =
+        unit === "custom"
+          ? this.formatCustomDistanceFromPixels(px)
+          : this.formatDistance(px * (mpp as number));
+
+        segments.push({
+          label,
+          terrainId: this.measureSegTerrainIds[i - 1] ?? terrains[0].id,
+        });
+    }
+
+    new MeasureTerrainModal(this.app, terrains, segments, (res) => {
+      this.measureSegTerrainIds = res.map((s) => s.terrainId);
+      this.updateMeasureHud();
+    }).open();
   }
   
   public toggleMeasureFromCommand(): void {
@@ -3088,6 +3254,9 @@ export class MapInstance extends Component {
       this.ignoreNextModify = true;
       await this.store.save(this.data);
     }
+	
+    // scale changed -> ping notes should be recalculated
+    this.schedulePingUpdate();
   }
 
   private updateMeasureHud(): void {
@@ -3108,7 +3277,13 @@ export class MapInstance extends Component {
       const lines: string[] = [`Distance: ${distTxt}`];
 
       if (meters != null) {
-        const tt = this.computeTravelTimeLines(meters);
+        const segments = this.plugin.settings.enableMeasurePro
+          ? this.computeMeasureSegmentsMeters(this.measuring && !!this.measurePreview)
+          : null;
+
+        const tt = segments
+          ? this.computeTravelTimeLinesBySegments(segments)
+          : this.computeTravelTimeLines(meters);
         if (tt.length) lines.push(...tt);
       }
 
@@ -3317,6 +3492,90 @@ export class MapInstance extends Component {
         if (perDay.note) {
           out.push(`Travel days: ${perDay.note}`);
         }
+        if (!perDayValue || !perDayUnit) {
+          out.push("Travel days: not configured (set per-day unit/value in settings)");
+          continue;
+        }
+
+        const presetUnitNorm = unit.trim().toLowerCase();
+        const perDayUnitNorm = perDayUnit.trim().toLowerCase();
+
+        if (presetUnitNorm !== perDayUnitNorm) {
+          out.push(`Travel days: unit mismatch (preset: ${unit}, per-day: ${perDayUnit})`);
+          continue;
+        }
+
+        const total = t;
+        const fullDays = Math.floor(total / perDayValue);
+        const rest = total - fullDays * perDayValue;
+
+        const restAbs = Math.abs(rest);
+        if (restAbs < 1e-6) {
+          out.push(`Travel days (${perDayValue} ${perDayUnit}/day): ${fullDays}d`);
+        } else if (fullDays <= 0) {
+          out.push(`Travel days (${perDayValue} ${perDayUnit}/day): 0d + ${this.formatTravelTimeNumber(rest)} ${unit}`);
+        } else {
+          out.push(`Travel days (${perDayValue} ${perDayUnit}/day): ${fullDays}d + ${this.formatTravelTimeNumber(rest)} ${unit}`);
+        }
+      }
+    }
+
+    return out;
+  }
+  
+  private computeTravelTimeLinesBySegments(segments: { meters: number; terrainId: string }[]): string[] {
+    const selected = new Set(this.data?.measurement?.travelTimePresetIds ?? []);
+    if (selected.size === 0) return [];
+
+    const presets = this.plugin.getActiveTravelTimePresets();
+    const out: string[] = [];
+
+    const perDayInfo = this.plugin.getActiveTravelPerDay();
+    const getTravelPerDay = (): { value: number | null; unit: string; note?: string } => {
+      if (!perDayInfo) return { value: null, unit: "" };
+
+      const value = Number.isFinite(perDayInfo.value) && perDayInfo.value > 0 ? perDayInfo.value : null;
+      const unit = (perDayInfo.unit ?? "").trim();
+      const note = perDayInfo.multipleEnabled
+        ? `Multiple travel packs enabled; using "${perDayInfo.packName ?? "first enabled"}".`
+        : undefined;
+
+      return { value, unit, note };
+    };
+
+    const perDay = getTravelPerDay();
+    const perDayValue = perDay.value;
+    const perDayUnit = perDay.unit;
+
+    const showDays = !!this.data?.measurement?.travelDaysEnabled;
+
+    for (const p of presets) {
+      if (!p?.id || !selected.has(p.id)) continue;
+
+      const name = (p.name ?? "").trim();
+      const unit = (p.timeUnit ?? "").trim();
+      if (!name || !unit) continue;
+
+      if (!Number.isFinite(p.timeValue) || p.timeValue <= 0) continue;
+
+      const refMeters = this.travelDistanceToMeters(
+        p.distanceValue,
+        p.distanceUnit,
+        p.distanceCustomUnitId,
+      );
+      if (!refMeters) continue;
+
+      let t = 0;
+      for (const seg of segments) {
+        const f = this.terrainFactor(seg.terrainId);
+        t += (seg.meters / refMeters) * p.timeValue / (f > 0 ? f : 1);
+      }
+
+      out.push(`Time (${name}): ${this.formatTravelTimeNumber(t)} ${unit}`);
+
+      if (showDays) {
+        if (perDay.note) out.push(`Travel days: ${perDay.note}`);
+
         if (!perDayValue || !perDayUnit) {
           out.push("Travel days: not configured (set per-day unit/value in settings)");
           continue;
@@ -3652,6 +3911,8 @@ export class MapInstance extends Component {
       }, 0);
 
       void this.saveDataSoon();
+      // marker moved -> ping notes might change
+      this.schedulePingUpdate();
     }
 
     // Ensure dragging class is removed even if pointerup happens outside the marker
@@ -3744,8 +4005,9 @@ this.viewDragDist = 0;
   private onDblClickViewport(e: MouseEvent): void {
     if (!this.ready) return;
 
-    if (this.drawingMode === "polygon" && this.drawPolygonPoints.length >= 2) {
-      this.finishPolygonDrawing();
+    if ((this.drawingMode === "polygon" || this.drawingMode === "polyline") && this.drawPolygonPoints.length >= 2) {
+      if (this.drawingMode === "polyline") this.finishPolylineDrawing();
+      else this.finishPolygonDrawing();
       return;
     }
 
@@ -3972,6 +4234,8 @@ this.viewDragDist = 0;
     stickersGlobal: StickerPreset[];
     swapBase: SwapPinPreset[];
     swapGlobal: SwapPinPreset[];
+    pingBase: PingPreset[];
+    pingGlobal: PingPreset[];
   } {
     const { matched, globals } = this.getCollectionsSplitForActive();
 
@@ -4008,6 +4272,16 @@ this.viewDragDist = 0;
     globals.forEach((c) =>
       (c.include?.swapPins ?? []).forEach((sp) => swapGlobal.push(sp)),
     );
+	
+    const pingBase: PingPreset[] = [];
+    matched.forEach((c) =>
+      (c.include?.pingPins ?? []).forEach((pp) => pingBase.push(pp)),
+    );
+
+    const pingGlobal: PingPreset[] = [];
+    globals.forEach((c) =>
+      (c.include?.pingPins ?? []).forEach((pp) => pingGlobal.push(pp)),
+    );
 
     return {
       pinsBase,
@@ -4018,6 +4292,8 @@ this.viewDragDist = 0;
       stickersGlobal,
       swapBase,
       swapGlobal,
+      pingBase,
+      pingGlobal,	  
     };
   }
   
@@ -4026,6 +4302,16 @@ this.viewDragDist = 0;
     for (const col of cols) {
       const list = col.include?.swapPins ?? [];
       const found = list.find((sp) => sp.id === id);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  
+  private findPingPresetById(id: string): PingPreset | undefined {
+    const cols = this.plugin.settings.baseCollections ?? [];
+    for (const col of cols) {
+      const list = col.include?.pingPins ?? [];
+      const found = list.find((pp) => pp.id === id);
       if (found) return found;
     }
     return undefined;
@@ -4039,6 +4325,11 @@ this.viewDragDist = 0;
     const count = preset.frames.length;
     const idx = ((rawIndex % count) + count) % count;
     return preset.frames[idx];
+  }
+  
+  private getPingPresetsSplitForActive(): { pingBase: PingPreset[]; pingGlobal: PingPreset[] } {
+    const { pingBase, pingGlobal } = this.computeCollectionSets();
+    return { pingBase, pingGlobal };
   }
   
   private getSwapEffectiveLink(m: Marker): string | undefined {
@@ -4122,10 +4413,11 @@ private onContextMenuViewport(e: MouseEvent): void {
     if (!this.ready || !this.data) return;
     this.closeMenu();
 
-    if (this.drawingMode === "polygon" && this.drawPolygonPoints.length >= 2) {
+    if ((this.drawingMode === "polygon" || this.drawingMode === "polyline") && this.drawPolygonPoints.length >= 2) {
       e.preventDefault();
       e.stopPropagation();
-      this.finishPolygonDrawing();
+      if (this.drawingMode === "polyline") this.finishPolylineDrawing();
+      else this.finishPolygonDrawing();
       return;
     }
 
@@ -4301,6 +4593,8 @@ private onContextMenuViewport(e: MouseEvent): void {
       stickersGlobal,
       swapBase,
       swapGlobal,
+      pingBase,
+      pingGlobal,
     } = this.computeCollectionSets();
 
     const pinItemFromKey = (key: string): ZMMenuItem | null => {
@@ -4404,6 +4698,45 @@ private onContextMenuViewport(e: MouseEvent): void {
         },
       },
     );
+	
+    // ---- Ping pins ----
+    {
+      const allPings: PingPreset[] = [...pingBase, ...pingGlobal].filter(Boolean);
+
+      const buildDistanceItems = (pp: PingPreset): ZMMenuItem[] => {
+        const vals = Array.isArray(pp.distances) && pp.distances.length ? pp.distances : [2, 5, 10];
+        return vals
+          .filter((n) => Number.isFinite(n) && n > 0)
+          .map((n) => ({
+            label: this.formatPingDistanceLabel(n, pp.unit, pp.customUnitId),
+            action: () => {
+              void this.addPingPinAt(pp, nx, ny, n);
+              this.closeMenu();
+            },
+          }));
+      };
+
+      if (allPings.length === 1) {
+        addHereChildren.push(
+          { type: "separator" },
+          {
+            label: `Party pin (${allPings[0].name || "Party"})`,
+            children: buildDistanceItems(allPings[0]),
+          },
+        );
+      } else if (allPings.length > 1) {
+        addHereChildren.push(
+          { type: "separator" },
+          {
+            label: "Party pin",
+            children: allPings.map((pp) => ({
+              label: pp.name || "(party)",
+              children: buildDistanceItems(pp),
+            })),
+          },
+        );
+      }
+    }
 	
 	if (allSwapPresets.length === 1) {
       const sp = allSwapPresets[0];
@@ -4759,10 +5092,33 @@ private onContextMenuViewport(e: MouseEvent): void {
             action: () => {
               if (this.measurePts.length > 0) {
                 this.measurePts.pop();
+				if (this.measureSegTerrainIds.length > 0) this.measureSegTerrainIds.pop();
                 this.renderMeasure();
               }
             },
           },
+          ...(this.plugin.settings.enableMeasurePro
+            ? [
+                {
+                  label: "Terrains…",
+                  action: () => {
+                    this.openMeasureTerrainModal();
+                    this.closeMenu();
+                  },
+                } as ZMMenuItem,
+              ]
+            : []),
+          ...(this.plugin.settings.enableDrawing
+            ? [
+                {
+                  label: "Save measurement as polyline…",
+                  action: () => {
+                    this.saveMeasurementAsPolyline();
+                    this.closeMenu();
+                  },
+                } as ZMMenuItem,
+              ]
+            : []),
           { type: "separator" },
           { label: "Unit", children: unitItems },
 		  { label: "Travel time", children: travelTimeItems },
@@ -4977,6 +5333,13 @@ if (this.plugin.settings.enableTextLayers && this.data) {
               label: "Circle",
               action: () => {
                 this.startDraw("circle");
+                this.closeMenu();
+              },
+            },
+            {
+              label: "Polyline",
+              action: () => {
+                this.startDraw("polyline");
                 this.closeMenu();
               },
             },
@@ -5474,6 +5837,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         void this.saveDataSoon();
         new Notice("Marker added.", 900);
         this.renderMarkersOnly();
+		this.schedulePingUpdate();
       }
     });
     modal.open();
@@ -5511,6 +5875,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       void this.saveDataSoon();
       this.renderMarkersOnly();
       new Notice("Marker added.", 900);
+	  this.schedulePingUpdate();
     }
   }
   
@@ -5609,6 +5974,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       void this.saveDataSoon();
       this.renderMarkersOnly();
       new Notice("Marker added (favorite).", 900);
+	  this.schedulePingUpdate();
     }
   }
 
@@ -5650,15 +6016,625 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       void this.saveDataSoon();
       this.renderMarkersOnly();
       new Notice("Sticker added.", 900);
+	  this.schedulePingUpdate();
     }
   }
 
   private deleteMarker(m: Marker): void {
     if (!this.data) return;
+	void this.deletePingNoteIfOwned(m);
     this.data.markers = this.data.markers.filter((mm) => mm.id !== m.id);
     void this.saveDataSoon();
     this.renderMarkersOnly();
     new Notice("Marker deleted.", 900);
+	this.schedulePingUpdate();
+  }
+  
+  // ===== Ping pins =====
+  private sanitizeFileName(s: string): string {
+    return (s ?? "")
+      .replace(/[\\/:*?"<>|]/g, "-")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private findCustomUnitDef(id: string): CustomUnitDef | undefined {
+    const packs = this.plugin.settings.travelRulesPacks ?? [];
+    for (const p of packs) {
+      const found = (p.customUnits ?? []).find((u) => u.id === id);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private pingUnitLabel(unit: PingDistanceUnit, customUnitId?: string): string {
+    if (unit !== "custom") return unit;
+    if (!customUnitId) return "u";
+    const def = this.findCustomUnitDef(customUnitId);
+    return (def?.abbreviation || def?.name || "u").trim() || "u";
+  }
+
+  private formatPingDistanceLabel(value: number, unit: PingDistanceUnit, customUnitId?: string): string {
+    return `${value} ${this.pingUnitLabel(unit, customUnitId)}`;
+  }
+
+  private getEffectivePxPerCustomUnit(customUnitId: string): number | undefined {
+    const direct = this.getCustomPxPerUnit(customUnitId);
+    if (direct) return direct;
+
+    const def = this.findCustomUnitDef(customUnitId);
+    const mpp = this.getMetersPerPixel();
+    if (!def || !mpp) return undefined;
+    if (!Number.isFinite(def.metersPerUnit) || def.metersPerUnit <= 0) return undefined;
+
+    return def.metersPerUnit / mpp;
+  }
+
+  private pingToPixels(value: number, unit: PingDistanceUnit, customUnitId?: string): number | null {
+    if (!Number.isFinite(value) || value <= 0) return null;
+
+    if (unit === "custom") {
+      if (!customUnitId) return null;
+      const pxPerUnit = this.getEffectivePxPerCustomUnit(customUnitId);
+      if (!pxPerUnit) return null;
+      return value * pxPerUnit;
+    }
+
+    const mpp = this.getMetersPerPixel();
+    if (!mpp) return null;
+
+    const meters =
+      unit === "km" ? value * 1000 :
+      unit === "mi" ? value * 1609.344 :
+      unit === "ft" ? value * 0.3048 :
+      value;
+
+    return meters / mpp;
+  }
+
+  private pingDistanceFromPixels(px: number, unit: PingDistanceUnit, customUnitId?: string): number | null {
+    if (!Number.isFinite(px) || px < 0) return null;
+
+    if (unit === "custom") {
+      if (!customUnitId) return null;
+      const pxPerUnit = this.getEffectivePxPerCustomUnit(customUnitId);
+      if (!pxPerUnit) return null;
+      return px / pxPerUnit;
+    }
+
+    const mpp = this.getMetersPerPixel();
+    if (!mpp) return null;
+    const meters = px * mpp;
+
+    if (unit === "km") return meters / 1000;
+    if (unit === "mi") return meters / 1609.344;
+    if (unit === "ft") return meters / 0.3048;
+    return meters;
+  }
+  
+  // --- Party pin: expand tags to related notes --------------------------------
+  private normalizeTagForIndex(tag: string): string {
+    return (tag ?? "").trim().replace(/^#/, "").toLowerCase();
+  }
+
+  private collectTagsForFile(file: TFile): Map<string, string> {
+    const out = new Map<string, string>(); // norm -> displayTag (#Case)
+    const add = (raw: string) => {
+      const t = (raw ?? "").trim();
+      if (!t) return;
+      const withHash = t.startsWith("#") ? t : `#${t}`;
+      const norm = this.normalizeTagForIndex(withHash);
+      if (!norm) return;
+      if (!out.has(norm)) out.set(norm, withHash);
+    };
+
+    const cache = this.app.metadataCache.getFileCache(file);
+    for (const tc of cache?.tags ?? []) add(tc.tag);
+
+    const fm = cache?.frontmatter ?? {};
+    const fmTags = (fm["tags"] ?? fm["tag"]) as unknown;
+    if (typeof fmTags === "string") {
+      fmTags
+        .split(/[, ]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach(add);
+    } else if (Array.isArray(fmTags)) {
+      for (const x of fmTags) if (typeof x === "string") add(x);
+    }
+
+    return out;
+  }
+
+  private fileMatchesPartyFilters(file: TFile, preset?: PingPreset): boolean {
+    if (!preset) return true;
+
+    const wantTagNorms = (preset.filterTags ?? [])
+      .map((t) => this.normalizeTagForIndex(t))
+      .filter(Boolean);
+
+    if (wantTagNorms.length) {
+      const tags = this.collectTagsForFile(file);
+      const hasAny = wantTagNorms.some((t) => tags.has(t));
+      if (!hasAny) return false;
+    }
+
+    const props = preset.filterProps ?? {};
+    if (props && Object.keys(props).length) {
+      const fm = (this.app.metadataCache.getFileCache(file)?.frontmatter ?? {}) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(props)) {
+        const want = (v ?? "").trim();
+        const have = fm[k];
+        if (have == null) return false;
+
+        const matchScalar = (x: unknown): boolean => {
+          if (typeof x === "string") return x.trim() === want;
+          if (typeof x === "number" || typeof x === "boolean") return String(x).trim() === want;
+          return false;
+        };
+
+        if (Array.isArray(have)) {
+          if (!have.some(matchScalar)) return false;
+        } else {
+          if (!matchScalar(have)) return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  private buildTagIndex(): Map<string, TFile[]> {
+    const index = new Map<string, TFile[]>();
+    const files = this.app.vault.getFiles().filter((f) => f.extension?.toLowerCase() === "md");
+    for (const f of files) {
+      const tags = this.collectTagsForFile(f);
+      for (const norm of tags.keys()) {
+        const arr = index.get(norm);
+        if (arr) arr.push(f);
+        else index.set(norm, [f]);
+      }
+    }
+    return index;
+  }
+
+  private formatWikiLink(file: TFile, fromPath: string): string {
+    const linktext = this.app.metadataCache.fileToLinktext(file, fromPath);
+    return `[[${linktext}]]`;
+  }
+
+  private escapeTableCell(s: string): string {
+    return (s ?? "").replace(/\|/g, "\\|");
+  }
+  
+  private splitFrontmatterBlock(text: string): { frontmatter: string; rest: string } {
+    const m = /^---\n[\s\S]*?\n(?:---|\.\.\.)\n/.exec(text);
+    if (!m) return { frontmatter: "", rest: text };
+    return { frontmatter: m[0], rest: text.slice(m[0].length) };
+  }
+
+  private extractFirstMarkdownHeading(text: string): string | null {
+    const m = /^#\s+.*$/m.exec(text);
+    return m ? m[0] : null;
+  }
+
+  private extractFirstCodeFenceBlock(text: string, lang: string): string | null {
+    const lines = text.split("\n");
+    const open = "```" + lang;
+    let start = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].trimStart().startsWith(open)) {
+        start = i;
+        break;
+      }
+    }
+    if (start < 0) return null;
+
+    let end = start + 1;
+    while (end < lines.length && !lines[end].trimStart().startsWith("```")) end += 1;
+    if (end >= lines.length) return null;
+
+    return lines.slice(start, end + 1).join("\n").trimEnd();
+  }
+
+  private buildPingNoteText(
+    prevText: string,
+    opts: {
+      defaultTitle: string;
+      baseYamlFallback: string;
+      tooltipBody: string;
+      relatedBody: string;
+    },
+  ): string {
+    const { frontmatter, rest } = this.splitFrontmatterBlock(prevText);
+
+    const title = (this.extractFirstMarkdownHeading(rest) ?? opts.defaultTitle).trimEnd();
+
+    const baseBlock =
+      this.extractFirstCodeFenceBlock(rest, "base") ??
+      `\`\`\`base\n${opts.baseYamlFallback.trimEnd()}\n\`\`\``;
+
+    const relatedSection = `${PING_RELATED_BEGIN}\n${opts.relatedBody.trimEnd()}\n${PING_RELATED_END}`;
+
+    const tooltipSection =
+      `## In-range markers without note\n` +
+      `${PING_TOOLTIP_BEGIN}\n${opts.tooltipBody.trimEnd()}\n${PING_TOOLTIP_END}`;
+
+    return `${frontmatter}${title}\n\n${relatedSection}\n\n${tooltipSection}\n\n${baseBlock}\n`;
+  }
+
+  private async upsertPingRelatedSection(file: TFile, body: string): Promise<void> {
+    await this.app.vault.process(file, (text) => {
+      const a = text.indexOf(PING_RELATED_BEGIN);
+      const b = text.indexOf(PING_RELATED_END);
+      if (a >= 0 && b > a) {
+        const before = text.slice(0, a + PING_RELATED_BEGIN.length);
+        const after = text.slice(b);
+        return `${before}\n${body}\n${after}`;
+      }
+      return text;
+    });
+  }
+
+  private schedulePingUpdate(delayMs = 900): void {
+    if (!this.data) return;
+    if (!this.data.markers?.some((m) => m.type === "ping")) return;
+
+    if (this.pingUpdateTimer !== null) window.clearTimeout(this.pingUpdateTimer);
+    this.pingUpdateTimer = window.setTimeout(() => {
+      this.pingUpdateTimer = null;
+      void this.updateAllPingNotes();
+    }, delayMs);
+  }
+
+  private async updateAllPingNotes(): Promise<void> {
+    if (!this.data) return;
+    const pings = this.data.markers.filter((m) => m.type === "ping");
+    for (const p of pings) {
+      try { await this.updatePingNoteForMarker(p); }
+      catch (e) { console.warn("Ping update failed", e); }
+    }
+  }
+
+  private buildPingBaseYaml(preset: PingPreset, unitLabel: string): string {
+    const andFilters: unknown[] = [
+      'list(this.zoommapPingInRangePaths).contains(file.path)',
+      'file.ext == "md"',
+    ];
+
+    const tags = (preset.filterTags ?? []).map((t) => (t ?? "").trim()).filter(Boolean);
+    if (tags.length) {
+      andFilters.push({
+        or: tags.map((t) => `file.hasTag("${t.replace(/^#/, "")}")`),
+      });
+    }
+
+    const props = preset.filterProps ?? {};
+    for (const [kRaw, vRaw] of Object.entries(props)) {
+      const k = (kRaw ?? "").trim();
+      const v = (vRaw ?? "").trim();
+      if (!k || !v) continue;
+      // string equality
+      andFilters.push(`note["${k.replace(/"/g, '\\"')}"] == "${v.replace(/"/g, '\\"')}"`);
+    }
+
+    const baseObj: Record<string, unknown> = {
+      filters: { and: andFilters },
+      formulas: {
+        ping_link: "file.asLink()",
+        distance: `this.zoommapPingDistances[file.path]`,
+        distance_label: `if(formula.distance, formula.distance.toString() + " ${unitLabel}", "")`,
+      },
+      views: [
+        {
+          type: "table",
+          name: "In range",
+          order: ["formula.ping_link", "formula.distance_label", "file.tags"],
+        },
+      ],
+    };
+
+    return stringifyYaml(baseObj).trimEnd();
+  }
+
+  private async addPingPinAt(preset: PingPreset, nx: number, ny: number, distanceValue: number): Promise<void> {
+    if (!this.data) return;
+
+    const unit = preset.unit ?? "km";
+    const customUnitId = preset.customUnitId;
+
+    if (unit === "custom" && (!customUnitId || !customUnitId.trim())) {
+      new Notice("Party preset uses a custom unit but no customunitid is set.", 4000);
+      return;
+    }
+
+    const radiusPx = this.pingToPixels(distanceValue, unit, customUnitId);
+    if (radiusPx == null) {
+      new Notice("Cannot create party pin: map scale is not calibrated for this unit.", 5000);
+      return;
+    }
+
+    // Layer handling (optional per preset)
+    let layerId = this.getPreferredNewMarkerLayerId();
+    if (preset.layerName) {
+      const found = this.data.layers.find((l) => l.name === preset.layerName);
+      if (found) layerId = found.id;
+      else {
+        const id = generateId("layer");
+        this.data.layers.push({ id, name: preset.layerName, visible: true, locked: false });
+        layerId = id;
+      }
+    }
+
+    const iconKey = preset.iconKey ?? this.plugin.settings.defaultIconKey;
+    const distanceLabel = this.formatPingDistanceLabel(distanceValue, unit, customUnitId);
+
+    const marker: Marker = {
+      id: generateId("ping"),
+      type: "ping",
+      x: nx,
+      y: ny,
+      layer: layerId,
+      iconKey,
+      tooltip: preset.name ? `Party: ${preset.name} (${distanceLabel})` : `Party (${distanceLabel})`,
+      pingPresetId: preset.id,
+      pingRadius: distanceValue,
+      pingRadiusUnit: unit,
+      pingRadiusCustomUnitId: unit === "custom" ? customUnitId : undefined,
+    };
+
+    const folder = (preset.noteFolder ?? "ZoomMap/Pings").trim() || "ZoomMap/Pings";
+    const baseName = this.sanitizeFileName(`Party - ${preset.name || "Party"} - ${distanceLabel} - ${marker.id}`);
+    let outPath = normalizePath(`${folder}/${baseName}.md`);
+    await this.ensureFolderForPath(outPath);
+
+    let i = 1;
+    while (this.app.vault.getAbstractFileByPath(outPath)) {
+      outPath = normalizePath(`${folder}/${baseName}-${i}.md`);
+      i++;
+    }
+
+    const unitLabel = this.pingUnitLabel(unit, customUnitId);
+    const baseYaml = this.buildPingBaseYaml(preset, unitLabel);
+
+    const fm: Record<string, unknown> = {
+      zoommapPing: true,
+      zoommapPingId: marker.id,
+      zoommapPingMapId: this.cfg.mapId ?? "",
+      zoommapPingBase: this.getActiveBasePath(),
+      zoommapPingRadius: distanceValue,
+      zoommapPingUnit: unit,
+      zoommapPingCustomUnitId: unit === "custom" ? customUnitId : undefined,
+      zoommapPingPresetId: preset.id,
+      zoommapPingPresetName: preset.name,
+      zoommapPingInRangePaths: [],
+      zoommapPingDistances: {},
+      zoommapPingUpdated: new Date().toISOString(),
+    };
+
+    const md =
+      `---\n${stringifyYaml(fm).trimEnd()}\n---\n\n` +
+      `# Party pin: ${preset.name || "Party"} (${distanceLabel})\n\n` +
+      `${PING_RELATED_BEGIN}\n\n${PING_RELATED_END}\n\n` +
+      "## In-range markers without note\n" +
+      `${PING_TOOLTIP_BEGIN}\n*(none)*\n${PING_TOOLTIP_END}\n\n` +
+      "```base\n" +
+      `${baseYaml}\n` +
+      "```\n";
+
+    const file = await this.app.vault.create(outPath, md);
+    marker.pingNotePath = file.path;
+    marker.link = this.app.metadataCache.fileToLinktext(file, this.cfg.sourcePath);
+
+    // Save marker
+    this.data.markers.push(marker);
+    await this.saveDataSoon();
+    this.renderMarkersOnly();
+
+    // Compute first result set immediately
+    await this.updatePingNoteForMarker(marker);
+
+    new Notice("Party pin created.", 1200);
+  }
+
+  private async updatePingNoteForMarker(ping: Marker): Promise<void> {
+    if (!this.data) return;
+    if (ping.type !== "ping") return;
+
+    const notePath = ping.pingNotePath ?? "";
+    const af = this.app.vault.getAbstractFileByPath(notePath);
+    if (!(af instanceof TFile)) return;
+
+    const radius = ping.pingRadius ?? 0;
+    const unit = ping.pingRadiusUnit ?? "km";
+    const customUnitId = ping.pingRadiusCustomUnitId;
+
+    const radiusPx = this.pingToPixels(radius, unit, customUnitId);
+    if (radiusPx == null) return;
+
+    const inRangePaths = new Set<string>();
+    const distances: Record<string, number> = {};
+
+    const tooltipMap = new Map<string, number>(); // tooltip -> min distance
+
+    for (const m of this.data.markers) {
+      if (m.id === ping.id) continue;
+      if (m.anchorSpace === "viewport") continue;
+      if (m.type === "ping") continue;
+
+      const dx = (m.x - ping.x) * this.imgW;
+      const dy = (m.y - ping.y) * this.imgH;
+      const pxDist = Math.hypot(dx, dy);
+      if (pxDist > radiusPx) continue;
+
+      const distVal = this.pingDistanceFromPixels(pxDist, unit, customUnitId);
+      const dist = distVal == null ? 0 : Math.round(distVal * 100) / 100;
+
+      const link = (m.link ?? "").trim();
+      if (link) {
+        const f = this.resolveTFile(link, this.cfg.sourcePath);
+        if (!f) continue;
+
+        inRangePaths.add(f.path);
+
+        const prev = distances[f.path];
+        if (prev == null || dist < prev) distances[f.path] = dist;
+        continue;
+      }
+
+      const tip = (m.tooltip ?? "").trim();
+      if (!tip) continue;
+
+      const prev = tooltipMap.get(tip);
+      if (prev == null || dist < prev) tooltipMap.set(tip, dist);
+    }
+
+    const listSorted = Array.from(inRangePaths).sort((a, b) => a.localeCompare(b));
+
+    const distancesSorted: Record<string, number> = Object.fromEntries(
+      Object.entries(distances).sort((a, b) => a[0].localeCompare(b[0])),
+    );
+    let fmChanged = false;
+    await this.app.fileManager.processFrontMatter(af, (fm) => {
+      const set = (key: string, value: unknown) => {
+        const cur = (fm as Record<string, unknown>)[key];
+        if (!stableEqual(cur, value)) {
+          (fm as Record<string, unknown>)[key] = value;
+          fmChanged = true;
+        }
+      };
+      const del = (key: string) => {
+        if (Object.prototype.hasOwnProperty.call(fm, key)) {
+          delete (fm as Record<string, unknown>)[key];
+          fmChanged = true;
+        }
+      };
+
+      set("zoommapPing", true);
+      set("zoommapPingId", ping.id);
+      set("zoommapPingMapId", this.cfg.mapId ?? "");
+      set("zoommapPingBase", this.getActiveBasePath());
+      set("zoommapPingRadius", radius);
+      set("zoommapPingUnit", unit);
+      if (unit === "custom") set("zoommapPingCustomUnitId", customUnitId);
+      else del("zoommapPingCustomUnitId");
+
+      set("zoommapPingPresetId", ping.pingPresetId ?? "");
+      set("zoommapPingInRangePaths", listSorted);
+      set("zoommapPingDistances", distancesSorted);
+
+      // Only touch the timestamp if something actually changed,
+      // otherwise the ping note would be rewritten every time.
+      if (fmChanged) {
+        set("zoommapPingUpdated", new Date().toISOString());
+      }
+    });
+
+    const unitLabel = this.pingUnitLabel(unit, customUnitId);
+    const tooltipsSorted = Array.from(tooltipMap.entries())
+      .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
+
+    const tooltipLines =
+      tooltipsSorted.length === 0
+        ? ["*(none)*"]
+        : tooltipsSorted.map(([txt, d]) => `- ${txt} (${d} ${unitLabel})`);
+
+	// --- Related notes by tags (per in-range note that matches the preset filters) ---
+    const preset = ping.pingPresetId ? this.findPingPresetById(ping.pingPresetId) : undefined;
+    const excludeTagNorms = new Set(
+      (preset?.filterTags ?? [])
+        .map((t) => this.normalizeTagForIndex(t))
+        .filter(Boolean),
+    );
+
+    const inRangeFiles = listSorted
+      .map((p) => this.app.vault.getAbstractFileByPath(p))
+      .filter((x): x is TFile => x instanceof TFile)
+      .map((file) => ({ file, dist: distances[file.path] ?? 0 }))
+      .filter(({ file }) => this.fileMatchesPartyFilters(file, preset))
+      .sort((a, b) => a.dist - b.dist || a.file.path.localeCompare(b.file.path));
+
+    const candidates = inRangeFiles.map(({ file, dist }) => {
+      const tags = this.collectTagsForFile(file);
+      for (const ex of excludeTagNorms) tags.delete(ex);
+
+      const norms = [...tags.keys()].sort((aa, bb) => {
+        const aTag = tags.get(aa) ?? aa;
+        const bTag = tags.get(bb) ?? bb;
+        return aTag.localeCompare(bTag, undefined, { sensitivity: "base" });
+      });
+
+      return { file, dist, tags, norms };
+    }).filter((c) => c.norms.length > 0);
+
+    let relatedBody = "";
+    if (candidates.length > 0) {
+      const tagIndex = this.buildTagIndex();
+      const tables: string[] = [];
+
+      for (const c of candidates) {
+        const pinLabel = `${this.formatWikiLink(c.file, af.path)} (${c.dist} ${unitLabel})`;
+
+        const lines: string[] = [];
+        lines.push(`| ${pinLabel} | Notes with tag |`);
+        lines.push("| --- | --- |");
+
+        for (const norm of c.norms) {
+          const displayTag = c.tags.get(norm) ?? `#${norm}`;
+
+          const matches = (tagIndex.get(norm) ?? [])
+            .filter((f) => f.path !== c.file.path && f.path !== af.path)
+            .sort((a, b) => a.basename.localeCompare(b.basename, undefined, { sensitivity: "base" }));
+
+          const links = matches.map((f) => this.formatWikiLink(f, af.path));
+          const cell = links.length ? links.join("<br>") : "*(none)*";
+          lines.push(`| ${this.escapeTableCell(displayTag)} | ${cell} |`);
+        }
+
+        tables.push(lines.join("\n"));
+      }
+
+      relatedBody = tables.join("\n\n").trim();
+    }
+
+    // Rebuild note body into the canonical layout and update both sections in one pass.
+    const dummyPreset = (preset ??
+      ({ id: "", name: "", distances: [], unit: "km" } as PingPreset));
+    const baseYamlFallback = this.buildPingBaseYaml(dummyPreset, unitLabel);
+
+    const distLabel = this.formatPingDistanceLabel(radius, unit, customUnitId);
+    const defaultTitle = `# Party pin: ${preset?.name || "Party"} (${distLabel})`;
+
+    const tooltipBody = tooltipLines.join("\n");
+
+    await this.app.vault.process(af, (text) => {
+      const next = this.buildPingNoteText(text, {
+        defaultTitle,
+        baseYamlFallback,
+        tooltipBody,
+        relatedBody,
+      });
+      return next === text ? text : next;
+    });
+  }
+
+  private async deletePingNoteIfOwned(m: Marker): Promise<void> {
+    if (m.type !== "ping") return;
+    const p = (m.pingNotePath ?? "").trim();
+    if (!p) return;
+
+    const af = this.app.vault.getAbstractFileByPath(p);
+    if (!(af instanceof TFile)) return;
+
+    const fm = this.app.metadataCache.getFileCache(af)?.frontmatter as Record<string, unknown> | undefined;
+    const owner = fm?.zoommapPingId;
+    if (owner !== m.id) return;
+
+    try {
+      await this.app.fileManager.trashFile(af, true);
+    } catch (e) {
+      console.warn("Failed to trash ping note", e);
+    }
   }
   
   private openPinSizeEditor(focusIconKey?: string | null): void {
@@ -5796,6 +6772,8 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       let minY = 0;
       let width = 0;
       let height = 0;
+      let polylineLenPx = 0;
+      let polylineMid: { x: number; y: number; angleDeg: number } | null = null;
 
       if (d.kind === "circle" && d.circle) {
         const { cx, cy, r } = d.circle;
@@ -5864,6 +6842,66 @@ if (this.plugin.settings.enableTextLayers && this.data) {
           height = maxPy - minPy;
         }
       }
+      else if (d.kind === "polyline" && d.polyline && d.polyline.length >= 2) {
+        const path = document.createElementNS(ns, "path");
+        let dAttr = "";
+        let minPx = Infinity;
+        let minPy = Infinity;
+        let maxPx = -Infinity;
+        let maxPy = -Infinity;
+
+        const absPts = d.polyline.map((p) => toAbs(p.x, p.y));
+
+        for (let i = 0; i < absPts.length; i += 1) {
+          const a = absPts[i];
+          dAttr += i === 0 ? `M ${a.x} ${a.y}` : ` L ${a.x} ${a.y}`;
+          minPx = Math.min(minPx, a.x);
+          maxPx = Math.max(maxPx, a.x);
+          minPy = Math.min(minPy, a.y);
+          maxPy = Math.max(maxPy, a.y);
+        }
+
+        for (let i = 1; i < absPts.length; i += 1) {
+          polylineLenPx += Math.hypot(absPts[i].x - absPts[i - 1].x, absPts[i].y - absPts[i - 1].y);
+        }
+
+        // midpoint on the polyline (for distance label)
+        if (polylineLenPx > 0) {
+          const target = polylineLenPx / 2;
+          let acc = 0;
+          for (let i = 1; i < absPts.length; i += 1) {
+            const p0 = absPts[i - 1];
+            const p1 = absPts[i];
+            const seg = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+            if (acc + seg >= target && seg > 0) {
+              const t = (target - acc) / seg;
+              const x = p0.x + (p1.x - p0.x) * t;
+              const y = p0.y + (p1.y - p0.y) * t;
+              const angleDeg = (Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180) / Math.PI;
+              polylineMid = { x, y, angleDeg };
+              break;
+            }
+            acc += seg;
+          }
+        }
+
+        path.setAttribute("d", dAttr);
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        shape = path;
+
+        if (
+          Number.isFinite(minPx) &&
+          Number.isFinite(maxPx) &&
+          Number.isFinite(minPy) &&
+          Number.isFinite(maxPy)
+        ) {
+          minX = minPx;
+          minY = minPy;
+          width = maxPx - minPx;
+          height = maxPy - minPy;
+        }
+      }
 
       if (!shape || width <= 0 || height <= 0) continue;
 
@@ -5874,7 +6912,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       };
 
       const patternKind: FillPatternKind =
-        style.fillPattern ?? (style.fillColor ? "solid" : "none");
+        d.kind === "polyline" ? "none" : (style.fillPattern ?? (style.fillColor ? "solid" : "none"));
 
       if (
         patternKind === "striped" ||
@@ -5972,10 +7010,59 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       } else {
         outline.removeAttribute("stroke-dasharray");
       }
+	  
+      if (d.kind === "polyline" && style.arrowEnd) {
+        const markerId = `zm-arrow-${d.id}`;
+        const marker = document.createElementNS(ns, "marker");
+        marker.setAttribute("id", markerId);
+        marker.setAttribute("viewBox", "0 0 10 10");
+        marker.setAttribute("refX", "10");
+        marker.setAttribute("refY", "5");
+        marker.setAttribute("markerWidth", "6");
+        marker.setAttribute("markerHeight", "6");
+        marker.setAttribute("orient", "auto");
+        marker.setAttribute("markerUnits", "strokeWidth");
+
+        const ap = document.createElementNS(ns, "path");
+        ap.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+        ap.setAttribute("fill", strokeColor);
+        marker.appendChild(ap);
+        this.drawDefs.appendChild(marker);
+
+        outline.setAttribute("marker-end", `url(#${markerId})`);
+      } else {
+        outline.removeAttribute("marker-end");
+      }
 
       outline.addEventListener("contextmenu", handleCtx);
       this.drawStaticLayer.appendChild(outline);
+	  
+      if (d.kind === "polyline" && style.distanceLabel && polylineMid && polylineLenPx > 0) {
+        const txt = this.formatPolylineDistance(polylineLenPx);
+        if (txt) {
+          const tEl = document.createElementNS(ns, "text");
+          tEl.classList.add("zm-draw__label");
+          tEl.setAttribute("x", String(polylineMid.x));
+          tEl.setAttribute("y", String(polylineMid.y));
+          tEl.setAttribute("text-anchor", "middle");
+          tEl.setAttribute("dominant-baseline", "middle");
+          tEl.setAttribute("fill", strokeColor);
+          if (Math.abs(polylineMid.angleDeg) > 0.01) {
+            tEl.setAttribute("transform", `rotate(${polylineMid.angleDeg} ${polylineMid.x} ${polylineMid.y})`);
+          }
+          tEl.textContent = txt;
+          this.drawStaticLayer.appendChild(tEl);
+        }
+      }
     }
+  }
+  
+  private formatPolylineDistance(px: number): string | null {
+    const unit = this.data?.measurement?.displayUnit ?? "auto-metric";
+    if (unit === "custom") return this.formatCustomDistanceFromPixels(px);
+    const mpp = this.getMetersPerPixel();
+    if (!mpp) return null;
+    return this.formatDistance(px * mpp);
   }
   
   private buildPatternSvgMarkup(
@@ -6211,6 +7298,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
               this.data.drawings[idx].rect = updated.rect;
               this.data.drawings[idx].circle = updated.circle;
               this.data.drawings[idx].polygon = updated.polygon;
+			  this.data.drawings[idx].polyline = updated.polyline;
 
               delete this.data.drawings[idx].bakedPath;
               delete this.data.drawings[idx].bakedWidth;
@@ -6295,7 +7383,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       this.getOrCreateDefaultDrawLayer().id;
 
     // Polygon: ignore second click of a double-click (detail > 1).
-    if (this.drawingMode === "polygon" && e.detail > 1) {
+    if ((this.drawingMode === "polygon" || this.drawingMode === "polyline") && e.detail > 1) {
       return true;
     }
 
@@ -6394,6 +7482,11 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       this.drawPolygonPoints.push({ x: nx, y: ny });
       return true;
     }
+	
+    if (this.drawingMode === "polyline") {
+      this.drawPolygonPoints.push({ x: nx, y: ny });
+      return true;
+    }
 
     return false;
   }
@@ -6420,6 +7513,52 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         strokeWidth: 2,
         fillColor: "#ff0000",
         fillOpacity: 0.15,
+      },
+    };
+
+    this.drawingMode = null;
+    this.drawingActiveLayerId = null;
+    this.drawRectStart = null;
+    this.drawCircleCenter = null;
+    this.drawPolygonPoints = [];
+    if (this.drawDraftLayer) {
+      this.drawDraftLayer.innerHTML = "";
+    }
+
+    const modal = new DrawingEditorModal(this.app, draft, (res) => {
+      if (!this.data) return;
+      if (res.action === "save" && res.drawing) {
+        this.data.drawings ??= [];
+        this.data.drawings.push(res.drawing);
+        void this.saveDataSoon();
+        this.renderDrawings();
+      }
+    });
+    modal.open();
+  }
+  
+  private finishPolylineDrawing(): void {
+    if (!this.drawingMode || this.drawingMode !== "polyline") return;
+    if (!this.data) return;
+    if (this.drawPolygonPoints.length < 2) return;
+
+    const layerId =
+      this.drawingActiveLayerId ??
+      this.getOrCreateDefaultDrawLayer().id;
+
+    const points = [...this.drawPolygonPoints];
+
+    const draft: Drawing = {
+      id: generateId("draw"),
+      layerId,
+      kind: "polyline",
+      visible: true,
+      polyline: points,
+      style: {
+        strokeColor: "#ff0000",
+        strokeWidth: 2,
+        arrowEnd: true,
+        distanceLabel: false,
       },
     };
 
@@ -6529,8 +7668,69 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       this.drawDraftLayer.appendChild(path);
       return true;
     }
+	
+    if (this.drawingMode === "polyline") {
+      if (this.drawPolygonPoints.length === 0) return false;
+
+      const all = [...this.drawPolygonPoints, { x: nx, y: ny }];
+
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      let dAttr = "";
+      all.forEach((p, idx) => {
+        const ax = p.x * this.imgW;
+        const ay = p.y * this.imgH;
+        dAttr += idx === 0 ? `M ${ax} ${ay}` : ` L ${ax} ${ay}`;
+      });
+      path.setAttribute("d", dAttr);
+      path.classList.add("zm-draw__shape");
+      path.setAttribute("stroke", "#ff0000");
+      path.setAttribute("stroke-width", "2");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+
+      this.drawDraftLayer.appendChild(path);
+      return true;
+    }	
 
     return false;
+  }
+  
+  private saveMeasurementAsPolyline(): void {
+    if (!this.plugin.settings.enableDrawing) return;
+    if (!this.data) return;
+    if (this.measurePts.length < 2) {
+      new Notice("No measurement to save (need at least 2 points).", 2500);
+      return;
+    }
+
+    const layerId = this.getOrCreateDefaultDrawLayer().id;
+    const points = this.measurePts.map((p) => ({ x: p.x, y: p.y }));
+
+    const draft: Drawing = {
+      id: generateId("draw"),
+      layerId,
+      kind: "polyline",
+      visible: true,
+      polyline: points,
+      style: {
+        strokeColor: this.plugin.settings.measureLineColor ?? "#ff0000",
+        strokeWidth: this.plugin.settings.measureLineWidth ?? 2,
+        arrowEnd: true,
+        distanceLabel: true,
+      },
+    };
+
+    new DrawingEditorModal(this.app, draft, (res) => {
+      if (!this.data) return;
+      if (res.action === "save" && res.drawing) {
+        this.data.drawings ??= [];
+        this.data.drawings.push(res.drawing);
+        void this.saveDataSoon();
+        this.renderDrawings();
+        new Notice("Saved as polyline.", 1200);
+      }
+    }).open();
   }
   
   private renderAll(): void {
@@ -6778,6 +7978,38 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         ev.preventDefault();
         ev.stopPropagation();
         this.closeMenu();
+		
+        if (m.type === "ping") {
+          const items: ZMMenuItem[] = [
+            {
+              label: "Open party note",
+              action: () => {
+                this.closeMenu();
+                this.openMarkerLink(m);
+              },
+            },
+            {
+              label: "Recalculate party",
+              action: () => {
+                this.closeMenu();
+                void this.updatePingNoteForMarker(m).then(() => {
+                  new Notice("Party note updated.", 1200);
+                });
+              },
+            },
+            {
+              label: "Delete party pin",
+              action: () => {
+                this.closeMenu();
+                this.deleteMarker(m);
+              },
+            },
+          ];
+
+          this.openMenu = new ZMMenu(this.el.ownerDocument);
+          this.openMenu.open(ev.clientX, ev.clientY, items);
+          return;
+        }
 
         if (m.type === "swap") {
           const preset = m.swapKey
@@ -7476,7 +8708,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     this.zoomHudTimer = window.setTimeout(() => {
       this.zoomHud?.classList.remove("zm-zoom-hud-visible");
       this.zoomHudTimer = null;
-    }, 1000); // 5 seconds display time
+    }, 1000); // 1 seconds display time
   }
 
   private requestPanFrame(): void {
@@ -7636,6 +8868,8 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       this.ignoreNextModify = true;
       await this.store.save(this.data);
     }
+    // scale changed -> ping notes should be recalculated
+    this.schedulePingUpdate();	
   }
 
   private promptAddLayer(kind: "base" | "overlay"): void {
@@ -8120,6 +9354,11 @@ private patchYamlListRemove(
       if (!targetId || targetId === layer.id) { new Notice("Invalid target layer.", 1500); return; }
       for (const m of this.data.markers) if (m.layer === layer.id) m.layer = targetId;
     } else {
+      // Delete ping notes for removed ping markers
+      const removed = this.data.markers.filter((m) => m.layer === layer.id);
+      for (const m of removed) {
+        await this.deletePingNoteIfOwned(m);
+      }
       this.data.markers = this.data.markers.filter((m) => m.layer !== layer.id);
     }
 
@@ -8127,6 +9366,7 @@ private patchYamlListRemove(
     await this.saveDataSoon();
     this.renderMarkersOnly();
     new Notice("Layer deleted.", 1000);
+	this.schedulePingUpdate();
   }
 }
 

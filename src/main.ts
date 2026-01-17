@@ -19,6 +19,7 @@ import type {
   IconProfile,
   BaseCollection,
   CustomUnitDef,
+  TerrainDef,
   TravelTimePreset,
   TravelRulesPack,
 } from "./map";
@@ -100,6 +101,7 @@ const DEFAULT_SETTINGS: ZoomMapSettingsExtended = {
       size: 24,
       anchorX: 12,
       anchorY: 12,
+	  inCollections: true,
     },
     {
       key: "pinBlue",
@@ -107,6 +109,7 @@ const DEFAULT_SETTINGS: ZoomMapSettingsExtended = {
       size: 24,
       anchorX: 12,
       anchorY: 12,
+	  inCollections: true,
     },
   ],
   defaultIconKey: "pinRed",
@@ -137,6 +140,7 @@ const DEFAULT_SETTINGS: ZoomMapSettingsExtended = {
   enableDrawing: false,
   preferActiveLayerInEditor: false,
   enableTextLayers: false,
+  enableMeasurePro: false,
   enableSessionImageCache: false,
   sessionImageCacheMb: 512,
   keepOverlaysLoaded: false,
@@ -676,6 +680,11 @@ export default class ZoomMapPlugin extends Plugin {
     const packs = this.getEnabledTravelPacks();
     return packs.flatMap((p) => p.customUnits ?? []);
   }
+  
+  getActiveTerrains(): TerrainDef[] {
+    const packs = this.getEnabledTravelPacks();
+    return packs.flatMap((p) => p.terrains ?? []);
+  }
 
   getActiveTravelTimePresets(): TravelTimePreset[] {
     const packs = this.getEnabledTravelPacks();
@@ -706,6 +715,7 @@ export default class ZoomMapPlugin extends Plugin {
         size: 24,
         anchorX: 12,
         anchorY: 12,
+		inCollections: true,
       }
     );
   }
@@ -737,6 +747,7 @@ export default class ZoomMapPlugin extends Plugin {
         }
 
         p.customUnits ??= [];
+		p.terrains ??= [];
         p.travelTimePresets ??= [];
         p.travelPerDay ??= { value: 8, unit: "h" };
 
@@ -771,6 +782,7 @@ export default class ZoomMapPlugin extends Plugin {
     }
     this.settings.travelPerDay.unit = (this.settings.travelPerDay.unit ?? "").trim() || "h";
 	this.settings.enableTextLayers ??= false;
+	this.settings.enableMeasurePro ??= false;
 	
     this.settings.enableSessionImageCache ??= false;
     this.settings.sessionImageCacheMb ??= 512;
@@ -778,6 +790,12 @@ export default class ZoomMapPlugin extends Plugin {
     this.settings.preferCanvasImagesWhenCaching ??= false;
 	this.settings.svgRasterMaxScale ??= 8;
 	this.settings.showImageIconPreviewInSettings ??= false;
+    // Icons: collection filter toggle
+    for (const ico of (this.settings.icons ?? [])) {
+      if (typeof (ico as { inCollections?: unknown }).inCollections !== "boolean") {
+        (ico as { inCollections: boolean }).inCollections = true;
+      }
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -1092,6 +1110,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
         anchorX: 12,
         anchorY: 12,
         defaultLink: "",
+		inCollections: true,
       });
 
       this.plugin.settings.icons = icons;
@@ -1456,7 +1475,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
           id: `col-${Math.random().toString(36).slice(2, 8)}`,
           name: "New Collection",
           bindings: { basePaths: [] },
-          include: { pinKeys: [], favorites: [], stickers: [] },
+          include: { pinKeys: [], favorites: [], stickers: [], swapPins: [], pingPins: [] },
         };
 
         new CollectionEditorModal(this.app, this.plugin, fresh, ({ updated, deleted }) => {
@@ -1527,14 +1546,42 @@ class ZoomMapSettingTab extends PluginSettingTab {
 	
     // ---- Add SVG icon (MOVE ABOVE LIST) ----
     const addSvgSetting = new Setting(containerEl)
-      .setName("Add SVG icon")
-      .setDesc("Create a pin icon from an SVG file in the configured folder.");
+      .setName("Add SVG icon or sort the list")
+      .setDesc("Create a pin icon from an SVG file in the configured folder, or sort the SVG icon list alphabetically.");
 
     const infoIcon = addSvgSetting.controlEl.createDiv({ cls: "zoommap-info-icon" });
     setIcon(infoIcon, "info");
     infoIcon.setAttr(
       "title",
       "Rendering many SVG files in the picker can cause noticeable delays while all previews are generated. Once the icons are cached, searching and adding should feel much faster.",
+    );
+	
+    addSvgSetting.addButton((b) =>
+      b.setButtonText("Sort a→z").onClick(() => {
+        const icons = this.plugin.settings.icons ?? [];
+        if (icons.length === 0) return;
+
+        // Only sorts SVG icons and keeps image icons in place.
+        const svgIcons = icons.filter((i) => isSvgIcon(i));
+        if (svgIcons.length <= 1) {
+          new Notice("No SVG icons to sort.", 2000);
+          return;
+        }
+
+        const keyOf = (i: IconProfile) => String(i.key ?? "").trim();
+        const sorted = [...svgIcons].sort((a, b) =>
+          keyOf(a).localeCompare(keyOf(b), undefined, { sensitivity: "base", numeric: true }),
+        );
+
+        let j = 0;
+        const next = icons.map((ico) => (isSvgIcon(ico) ? sorted[j++] : ico));
+
+        this.plugin.settings.icons = next;
+        void this.plugin.saveSettings().then(() => {
+          renderIcons?.();
+          new Notice(`Sorted ${sorted.length} SVG icons.`, 2000);
+        });
+      }),
     );
 
     addSvgSetting.addButton((b) =>
@@ -1690,6 +1737,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
 
     // SVG icons table header
     const svgIconsHead = containerEl.createDiv({ cls: "zm-icons-grid-head zm-grid" });
+	svgIconsHead.createSpan();
     svgIconsHead.createSpan({ text: "Name" });
     svgIconsHead.createSpan({ text: "Preview / color / link" });
     svgIconsHead.createSpan({ text: "Size" });
@@ -1716,8 +1764,35 @@ class ZoomMapSettingTab extends PluginSettingTab {
 	
     // ---- Add new icon (MOVE ABOVE LIST) ----
     new Setting(containerEl)
-      .setName("Add new icon")
-      .setDesc("Create a new image-based icon entry.")
+      .setName("Add new icon or sort the list")
+      .setDesc("Create a new image-based icon entry, or sort the image icon list alphabetically.")
+      .addButton((b) =>
+        b.setButtonText("Sort a→z").onClick(() => {
+          const icons = this.plugin.settings.icons ?? [];
+          if (icons.length === 0) return;
+
+          // Only sort "image icons" (non-SVG) and keep SVG icons in place.
+          const imgIcons = icons.filter((i) => !isSvgIcon(i));
+          if (imgIcons.length <= 1) {
+            new Notice("No image icons to sort.", 2000);
+            return;
+          }
+
+          const keyOf = (i: IconProfile) => String(i.key ?? "").trim();
+          const sorted = [...imgIcons].sort((a, b) =>
+            keyOf(a).localeCompare(keyOf(b), undefined, { sensitivity: "base", numeric: true }),
+          );
+
+          let j = 0;
+          const next = icons.map((ico) => (isSvgIcon(ico) ? ico : sorted[j++]));
+
+          this.plugin.settings.icons = next;
+          void this.plugin.saveSettings().then(() => {
+            renderIcons?.();
+            new Notice(`Sorted ${sorted.length} image icons.`, 2000);
+          });
+        }),
+      )
       .addButton((b) =>
         b.setButtonText("Add").onClick(() => {
           const idx = this.plugin.settings.icons.length + 1;
@@ -1727,6 +1802,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
             size: 24,
             anchorX: 12,
             anchorY: 12,
+			inCollections: true,
           });
           void this.plugin.saveSettings();
           renderIcons?.();
@@ -1734,6 +1810,7 @@ class ZoomMapSettingTab extends PluginSettingTab {
       );
 
     const imgIconsHead = containerEl.createDiv({ cls: "zm-icons-grid-head zm-grid zm-icons-grid-head--img" });
+	imgIconsHead.createSpan();
     imgIconsHead.createSpan({ text: "Name" });
     if (this.plugin.settings.showImageIconPreviewInSettings) {
       imgIconsHead.createSpan();
@@ -1767,6 +1844,14 @@ class ZoomMapSettingTab extends PluginSettingTab {
       for (const icon of this.plugin.settings.icons) {
         if (isSvgIcon(icon)) {
           const row = svgIconsGrid.createDiv({ cls: "zm-row" });
+		  
+          const enabled = row.createEl("input", { type: "checkbox" });
+          enabled.addClass("zoommap-settings__icon-collections-toggle");
+          enabled.checked = icon.inCollections !== false;
+          enabled.onchange = () => {
+            icon.inCollections = enabled.checked;
+            void this.plugin.saveSettings();
+          };
 
           const name = row.createEl("input", { type: "text" });
           name.classList.add("zm-name");
@@ -1945,6 +2030,14 @@ class ZoomMapSettingTab extends PluginSettingTab {
           };
         } else {
           const row = imgIconsGrid.createDiv({ cls: "zm-row" });
+		  
+          const enabled = row.createEl("input", { type: "checkbox" });
+          enabled.addClass("zoommap-settings__icon-collections-toggle");
+          enabled.checked = icon.inCollections !== false;
+          enabled.onchange = () => {
+            icon.inCollections = enabled.checked;
+            void this.plugin.saveSettings();
+          };
 
           const name = row.createEl("input", { type: "text" });
           name.classList.add("zm-name");
