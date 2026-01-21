@@ -820,7 +820,7 @@ class PingPresetEditorModal extends Modal {
 
     new Setting(contentEl)
       .setName("Filter properties (optional)")
-      .setDesc('One per line: key=value (and filter). Example: type=npc')
+      .setDesc('One per line: key=value. Example: type=npc')
       .addTextArea((a) => {
         const props = this.working.filterProps ?? {};
         a.setValue(Object.entries(props).map(([k, v]) => `${k}=${v}`).join("\n"));

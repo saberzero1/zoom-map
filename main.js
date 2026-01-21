@@ -2731,7 +2731,7 @@ var PingPresetEditorModal = class extends import_obsidian11.Modal {
         this.working.filterTags = tags;
       });
     });
-    new import_obsidian11.Setting(contentEl).setName("Filter properties (optional)").setDesc("One per line: key=value (and filter). Example: type=npc").addTextArea((a) => {
+    new import_obsidian11.Setting(contentEl).setName("Filter properties (optional)").setDesc("One per line: key=value. Example: type=npc").addTextArea((a) => {
       var _a2;
       const props = (_a2 = this.working.filterProps) != null ? _a2 : {};
       a.setValue(Object.entries(props).map(([k, v]) => `${k}=${v}`).join("\n"));
@@ -8356,20 +8356,20 @@ var MapInstance = class extends import_obsidian16.Component {
     const props = (_b = preset.filterProps) != null ? _b : {};
     if (props && Object.keys(props).length) {
       const fm = (_d = (_c = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _c.frontmatter) != null ? _d : {};
-      for (const [k, v] of Object.entries(props)) {
-        const want = (v != null ? v : "").trim();
-        const have = fm[k];
-        if (have == null) return false;
-        const matchScalar = (x) => {
-          if (typeof x === "string") return x.trim() === want;
-          if (typeof x === "number" || typeof x === "boolean") return String(x).trim() === want;
-          return false;
-        };
-        if (Array.isArray(have)) {
-          if (!have.some(matchScalar)) return false;
-        } else {
-          if (!matchScalar(have)) return false;
-        }
+      const matchScalar = (x, want) => {
+        if (typeof x === "string") return x.trim() === want;
+        if (typeof x === "number" || typeof x === "boolean") return String(x).trim() === want;
+        return false;
+      };
+      const clauses = Object.entries(props).map(([k, v]) => ({ key: (k != null ? k : "").trim(), want: (v != null ? v : "").trim() })).filter((c) => c.key.length > 0 && c.want.length > 0);
+      if (clauses.length) {
+        const matchesAny = clauses.some(({ key, want }) => {
+          const have = fm[key];
+          if (have == null) return false;
+          if (Array.isArray(have)) return have.some((x) => matchScalar(x, want));
+          return matchScalar(have, want);
+        });
+        if (!matchesAny) return false;
       }
     }
     return true;
@@ -8493,11 +8493,15 @@ ${after}`;
       });
     }
     const props = (_b = preset.filterProps) != null ? _b : {};
+    const propClauses = [];
     for (const [kRaw, vRaw] of Object.entries(props)) {
       const k = (kRaw != null ? kRaw : "").trim();
       const v = (vRaw != null ? vRaw : "").trim();
       if (!k || !v) continue;
-      andFilters.push(`note["${k.replace(/"/g, '\\"')}"] == "${v.replace(/"/g, '\\"')}"`);
+      propClauses.push(`note["${k.replace(/"/g, '\\"')}"] == "${v.replace(/"/g, '\\"')}"`);
+    }
+    if (propClauses.length) {
+      andFilters.push({ or: propClauses });
     }
     const baseObj = {
       filters: { and: andFilters },

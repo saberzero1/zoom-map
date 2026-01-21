@@ -6266,22 +6266,25 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     const props = preset.filterProps ?? {};
     if (props && Object.keys(props).length) {
       const fm = (this.app.metadataCache.getFileCache(file)?.frontmatter ?? {}) as Record<string, unknown>;
-      for (const [k, v] of Object.entries(props)) {
-        const want = (v ?? "").trim();
-        const have = fm[k];
-        if (have == null) return false;
+      const matchScalar = (x: unknown, want: string): boolean => {
+        if (typeof x === "string") return x.trim() === want;
+        if (typeof x === "number" || typeof x === "boolean") return String(x).trim() === want;
+        return false;
+      };
 
-        const matchScalar = (x: unknown): boolean => {
-          if (typeof x === "string") return x.trim() === want;
-          if (typeof x === "number" || typeof x === "boolean") return String(x).trim() === want;
-          return false;
-        };
+      const clauses = Object.entries(props)
+        .map(([k, v]) => ({ key: (k ?? "").trim(), want: (v ?? "").trim() }))
+        .filter((c) => c.key.length > 0 && c.want.length > 0);
 
-        if (Array.isArray(have)) {
-          if (!have.some(matchScalar)) return false;
-        } else {
-          if (!matchScalar(have)) return false;
-        }
+      if (clauses.length) {
+        const matchesAny = clauses.some(({ key, want }) => {
+          const have = fm[key];
+          if (have == null) return false;
+          if (Array.isArray(have)) return have.some((x) => matchScalar(x, want));
+          return matchScalar(have, want);
+        });
+
+        if (!matchesAny) return false;
       }
     }
 
@@ -6414,12 +6417,15 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     }
 
     const props = preset.filterProps ?? {};
+	const propClauses: string[] = [];
     for (const [kRaw, vRaw] of Object.entries(props)) {
       const k = (kRaw ?? "").trim();
       const v = (vRaw ?? "").trim();
       if (!k || !v) continue;
-      // string equality
-      andFilters.push(`note["${k.replace(/"/g, '\\"')}"] == "${v.replace(/"/g, '\\"')}"`);
+      propClauses.push(`note["${k.replace(/"/g, '\\"')}"] == "${v.replace(/"/g, '\\"')}"`);
+    }
+    if (propClauses.length) {
+      andFilters.push({ or: propClauses });
     }
 
     const baseObj: Record<string, unknown> = {
