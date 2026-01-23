@@ -6,7 +6,7 @@ Joshua Plunkett (obsidianttrpgtutorials.com) made a video about it. Due to ongoi
 [![Watch video](assets/maxresdefault.jpg)](https://youtu.be/rB4MCgl44lU)
 
 ## Documentation
-- [User Manual](assets/Handbook ver 1-1-5.pdf)
+[User Manual](assets/Handbook-ver-1-1-5.pdf)
 
 
 ## Features
