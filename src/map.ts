@@ -69,6 +69,13 @@ export interface PingPreset {
   relatedLookup?: "off" | "tags" | "backlinks";
   searchLayersMode?: "all" | "self" | "custom";
   searchLayerNames?: string[]; // used when searchLayersMode === "custom"
+  
+  sections?: {
+    bases?: boolean;
+    related?: boolean;
+    tooltips?: boolean;
+    travelTimes?: boolean;
+  };
 }
 
 export interface StickerPreset {
@@ -247,6 +254,7 @@ export interface ZoomMapSettings {
   keepOverlaysLoaded?: boolean;
   preferCanvasImagesWhenCaching?: boolean;
   showImageIconPreviewInSettings?: boolean;
+  middleClickOpensLinkInNewTab?: boolean;
 }
 
 interface Point { x: number; y: number; }
@@ -257,6 +265,8 @@ const PING_TOOLTIP_BEGIN = "<!-- ZOOMMAP-PING-TOOLTIP:BEGIN -->";
 const PING_TOOLTIP_END = "<!-- ZOOMMAP-PING-TOOLTIP:END -->";
 const PING_RELATED_BEGIN = "<!-- ZOOMMAP-PING-RELATED:BEGIN -->";
 const PING_RELATED_END = "<!-- ZOOMMAP-PING-RELATED:END -->";
+const PING_TRAVEL_BEGIN = "<!-- ZOOMMAP-PING-TRAVEL:BEGIN -->";
+const PING_TRAVEL_END = "<!-- ZOOMMAP-PING-TRAVEL:END -->";
 
 /* ===== Helpers ===== */
 function clamp(n: number, min: number, max: number): number {
@@ -2329,6 +2339,7 @@ export class MapInstance extends Component {
       if (showNow) {
         const rect = document.createElementNS(ns, "rect");
         rect.classList.add("zm-text-guide-rect");
+		rect.classList.add("zm-text-guide--active");
         rect.setAttribute("x", String(r.x));
         rect.setAttribute("y", String(r.y));
         rect.setAttribute("width", String(r.w));
@@ -2341,6 +2352,7 @@ export class MapInstance extends Component {
 
           const line = document.createElementNS(ns, "line");
           line.classList.add("zm-text-guide-line");
+		  line.classList.add("zm-text-guide--active");
           line.setAttribute("x1", String(a.x));
           line.setAttribute("y1", String(a.y));
           line.setAttribute("x2", String(b.x));
@@ -2429,6 +2441,7 @@ export class MapInstance extends Component {
 
       const line = document.createElementNS(ns, "line");
       line.classList.add("zm-text-guide-draft");
+	  line.classList.add("zm-text-guide--active");
       line.setAttribute("x1", String(a.x));
       line.setAttribute("y1", String(a.y));
       line.setAttribute("x2", String(b.x));
@@ -5021,13 +5034,6 @@ private onContextMenuViewport(e: MouseEvent): void {
       );
     }	
 
-	if (this.plugin.settings.enableDrawing) {
-	  imageLayersChildren.push({
-		label: "Draw layers",
-		children: drawLayerChildren,
-	  });
-	}
-
 	imageLayersChildren.push(
 	  { type: "separator" },
 	  {
@@ -5073,41 +5079,17 @@ private onContextMenuViewport(e: MouseEvent): void {
 	const travelPresets = this.plugin.getActiveTravelTimePresets();
 	const selectedTravel = new Set(this.data.measurement?.travelTimePresetIds ?? []);
 
-	const travelTimeItems: ZMMenuItem[] =
-      travelPresets.length
-        ? travelPresets.map((p) => ({
-            label: p.name || p.id,
-            checked: selectedTravel.has(p.id),
-            action: (rowEl) => {
-             this.ensureMeasurement();
-              if (!this.data?.measurement) return;
-              const arr = (this.data.measurement.travelTimePresetIds ??= []);
-              const i = arr.indexOf(p.id);
-              if (i >= 0) arr.splice(i, 1);
-              else arr.push(p.id);
+    const travelTimeItems: ZMMenuItem[] = [];
 
-              void this.saveDataSoon();
-              this.updateMeasureHud();
-
-              const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
-              if (chk) chk.textContent = i >= 0 ? "" : "✓";
-            },
-          }))
-        : [
-            {
-              label: "(No travel presets configured)",
-              action: () => {
-                new Notice("Configure presets in settings → travel rules.", 3000);
-              },
-            },
-          ];
-		  
-    // --- Travel days toggle (per map) ---
-    travelTimeItems.push({ type: "separator" });
-
+    const perDayInfo = this.plugin.getActiveTravelPerDayPresets?.();
+    const perDayPresets = perDayInfo?.presets ?? [];
+    const selectedPerDayId = (this.data.measurement?.travelDayPresetId ?? "").trim();
+    const effectiveId = (selectedPerDayId && perDayPresets.some((p) => p.id === selectedPerDayId))
+      ? selectedPerDayId
+      : (perDayPresets[0]?.id ?? "");
+	  
     {
       const enabled = !!this.data.measurement?.travelDaysEnabled;
-
       travelTimeItems.push({
         label: "Show travel days",
         mark: enabled ? "check" : "x",
@@ -5125,24 +5107,12 @@ private onContextMenuViewport(e: MouseEvent): void {
           const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
           if (chk) {
             chk.textContent = next ? "✓" : "×";
-            chk.style.color = next
-              ? "var(--text-accent)"
-              : "var(--text-muted)";
+            chk.style.color = next ? "var(--text-accent)" : "var(--text-muted)";
           }
         },
         checked: false,
       });
     }
-	
-    // --- Max travel time selection (per map) ---
-    travelTimeItems.push({ type: "separator" });
-
-    const perDayInfo = this.plugin.getActiveTravelPerDayPresets?.();
-    const perDayPresets = perDayInfo?.presets ?? [];
-    const selectedPerDayId = (this.data.measurement?.travelDayPresetId ?? "").trim();
-    const effectiveId = (selectedPerDayId && perDayPresets.some((p) => p.id === selectedPerDayId))
-      ? selectedPerDayId
-      : (perDayPresets[0]?.id ?? "");
 
     travelTimeItems.push({
       label: "Max travel time",
@@ -5164,7 +5134,37 @@ private onContextMenuViewport(e: MouseEvent): void {
             },
           }))
         : [{ label: "(No max travel time presets configured)", action: () => new Notice("Configure max travel time presets in settings → travel rules.", 3500) }],
-    });	
+    });
+	
+    travelTimeItems.push({ type: "separator" });
+
+    if (travelPresets.length) {
+      travelTimeItems.push(
+        ...travelPresets.map((p) => ({
+          label: p.name || p.id,
+          checked: selectedTravel.has(p.id),
+          action: (rowEl: HTMLDivElement) => {
+            this.ensureMeasurement();
+            if (!this.data?.measurement) return;
+            const arr = (this.data.measurement.travelTimePresetIds ??= []);
+            const i = arr.indexOf(p.id);
+            if (i >= 0) arr.splice(i, 1);
+            else arr.push(p.id);
+
+            void this.saveDataSoon();
+            this.updateMeasureHud();
+
+            const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
+            if (chk) chk.textContent = i >= 0 ? "" : "✓";
+          },
+        })),
+      );
+    } else {
+      travelTimeItems.push({
+        label: "(No travel presets configured)",
+        action: () => new Notice("Configure presets in settings → travel rules.", 3000),
+      });
+    }
 
     items.push(
       { type: "separator" },
@@ -5423,6 +5423,11 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         {
           label: "Draw",
           children: [
+            {
+              label: "Draw layers",
+              children: drawLayerChildren,
+            },
+            { type: "separator" },
             {
               label: "Rectangle",
               action: () => {
@@ -6448,6 +6453,24 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
     return lines.slice(start, end + 1).join("\n").trimEnd();
   }
+  
+  private openLinkInNewTab(link: string): void {
+    const leaf = this.app.workspace.getLeaf("tab");
+    const anyLeaf = leaf as unknown as { openLinkText?: (linktext: string, sourcePath: string) => Promise<void> };
+    if (typeof anyLeaf.openLinkText === "function") {
+      void anyLeaf.openLinkText(link, this.cfg.sourcePath);
+      return;
+    }
+
+    const anyWs = this.app.workspace as unknown as {
+      openLinkText: (linktext: string, sourcePath: string, newLeaf?: boolean) => Promise<void>;
+    };
+    try {
+      void anyWs.openLinkText(link, this.cfg.sourcePath, true);
+    } catch {
+      void this.app.workspace.openLinkText(link, this.cfg.sourcePath);
+    }
+  }
 
   private buildPingNoteText(
     prevText: string,
@@ -6456,23 +6479,45 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       baseYamlFallback: string;
       tooltipBody: string;
       relatedBody: string;
+      travelBody: string;
+      includeBases: boolean;
+      includeTooltips: boolean;
+      includeRelated: boolean;
+      includeTravel: boolean;
     },
   ): string {
     const { frontmatter, rest } = this.splitFrontmatterBlock(prevText);
 
     const title = (this.extractFirstMarkdownHeading(rest) ?? opts.defaultTitle).trimEnd();
 
-    const baseBlock =
-      this.extractFirstCodeFenceBlock(rest, "base") ??
-      `\`\`\`base\n${opts.baseYamlFallback.trimEnd()}\n\`\`\``;
+    const baseBlock = opts.includeBases
+      ? (this.extractFirstCodeFenceBlock(rest, "base") ??
+        `\`\`\`base\n${opts.baseYamlFallback.trimEnd()}\n\`\`\``)
+      : "";
 
-    const relatedSection = `${PING_RELATED_BEGIN}\n${opts.relatedBody.trimEnd()}\n${PING_RELATED_END}`;
+    const relatedSection = opts.includeRelated
+      ? `${PING_RELATED_BEGIN}\n${opts.relatedBody.trimEnd()}\n${PING_RELATED_END}`
+      : "";
 
-    const tooltipSection =
-      `## In-range markers without note\n` +
-      `${PING_TOOLTIP_BEGIN}\n${opts.tooltipBody.trimEnd()}\n${PING_TOOLTIP_END}`;
+    const travelSection = opts.includeTravel
+      ? (`## Travel times\n` +
+        `${PING_TRAVEL_BEGIN}\n${opts.travelBody.trimEnd()}\n${PING_TRAVEL_END}`)
+      : "";
 
-    return `${frontmatter}${title}\n\n${relatedSection}\n\n${tooltipSection}\n\n${baseBlock}\n`;
+    const tooltipSection = opts.includeTooltips
+      ? (`## In-range markers without note\n` +
+        `${PING_TOOLTIP_BEGIN}\n${opts.tooltipBody.trimEnd()}\n${PING_TOOLTIP_END}`)
+      : "";
+
+    const parts = [
+      `${frontmatter}${title}`,
+      relatedSection,
+      travelSection,
+      tooltipSection,
+      baseBlock,
+    ].filter((s) => (s ?? "").trim().length > 0);
+
+    return `${parts.join("\n\n").trimEnd()}\n`;
   }
 
   private async upsertPingRelatedSection(file: TFile, body: string): Promise<void> {
@@ -6559,6 +6604,45 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
     return stringifyYaml(baseObj).trimEnd();
   }
+  
+  private buildPingTravelTimesTable(
+    fromPath: string,
+    inRangeFiles: { file: TFile; dist: number }[],
+    metersByPath: Record<string, number>,
+  ): string {
+    const presets = this.plugin.getActiveTravelTimePresets();
+    if (!presets.length) return "*(none)*";
+
+    const locs = inRangeFiles
+      .map((x) => ({ file: x.file, meters: metersByPath[x.file.path] }))
+      .filter((x): x is { file: TFile; meters: number } => typeof x.meters === "number" && Number.isFinite(x.meters) && x.meters >= 0);
+
+    if (!locs.length) return "*(no calibrated scale)*";
+
+    const header: string[] = ["Mode", ...locs.map((l) => this.formatWikiLink(l.file, fromPath))];
+    const rows: string[] = [];
+    rows.push(`| ${header.map((c) => this.escapeTableCell(c)).join(" | ")} |`);
+    rows.push(`| ${header.map(() => "---").join(" | ")} |`);
+
+    for (const p of presets) {
+      const refMeters = this.travelDistanceToMeters(p.distanceValue, p.distanceUnit, p.distanceCustomUnitId);
+      const name = p.name || p.id;
+      const unit = (p.timeUnit ?? "").trim() || "h";
+
+      const cells: string[] = [name];
+      for (const loc of locs) {
+        if (!refMeters || !Number.isFinite(refMeters) || refMeters <= 0) {
+          cells.push("-");
+          continue;
+        }
+        const t = (loc.meters / refMeters) * p.timeValue;
+        cells.push(`${this.formatTravelTimeNumber(t)} ${unit}`);
+      }
+      rows.push(`| ${cells.map((c) => this.escapeTableCell(c)).join(" | ")} |`);
+    }
+
+    return rows.join("\n").trimEnd();
+  }
 
   private async addPingPinAt(preset: PingPreset, nx: number, ny: number, distanceValue: number): Promise<void> {
     if (!this.data) return;
@@ -6620,6 +6704,11 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
     const unitLabel = this.pingUnitLabel(unit, customUnitId);
     const baseYaml = this.buildPingBaseYaml(preset, unitLabel);
+    const sections = preset.sections ?? {};
+    const includeBases = sections.bases !== false;
+    const includeTooltips = sections.tooltips !== false;
+    const includeRelated = sections.related !== false;
+    const includeTravel = sections.travelTimes !== false;
 
     const fm: Record<string, unknown> = {
       zoommapPing: true,
@@ -6636,15 +6725,26 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       zoommapPingUpdated: new Date().toISOString(),
     };
 
+    const frontmatter = `---\n${stringifyYaml(fm).trimEnd()}\n---\n\n`;
+    const defaultTitle = `# Party pin: ${preset.name || "Party"} (${distanceLabel})`;
+    const relatedBody = "*(none)*";
+    const tooltipBody = "*(none)*";
+    const travelBody = "*(none)*";
+    const baseYamlFallback = baseYaml;
+
     const md =
-      `---\n${stringifyYaml(fm).trimEnd()}\n---\n\n` +
-      `# Party pin: ${preset.name || "Party"} (${distanceLabel})\n\n` +
-      `${PING_RELATED_BEGIN}\n\n${PING_RELATED_END}\n\n` +
-      "## In-range markers without note\n" +
-      `${PING_TOOLTIP_BEGIN}\n*(none)*\n${PING_TOOLTIP_END}\n\n` +
-      "```base\n" +
-      `${baseYaml}\n` +
-      "```\n";
+      frontmatter +
+      this.buildPingNoteText("", {
+        defaultTitle,
+        baseYamlFallback,
+        tooltipBody,
+        relatedBody,
+        travelBody,
+        includeBases,
+        includeTooltips,
+        includeRelated,
+        includeTravel,
+      });
 
     const file = await this.app.vault.create(outPath, md);
     marker.pingNotePath = file.path;
@@ -6681,8 +6781,11 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
     const inRangePaths = new Set<string>();
     const distances: Record<string, number> = {};
+	const metersByPath: Record<string, number> = {};
 
     const tooltipMap = new Map<string, number>(); // tooltip -> min distance
+	
+	const mpp = this.getMetersPerPixel();
 
     for (const m of this.data.markers) {
       if (m.id === ping.id) continue;
@@ -6707,6 +6810,12 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
         const prev = distances[f.path];
         if (prev == null || dist < prev) distances[f.path] = dist;
+		
+        if (typeof mpp === "number") {
+          const meters = pxDist * mpp;
+          const prevM = metersByPath[f.path];
+          if (prevM == null || meters < prevM) metersByPath[f.path] = meters;
+        }
         continue;
       }
 
@@ -6768,6 +6877,12 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         : tooltipsSorted.map(([txt, d]) => `- ${txt} (${d} ${unitLabel})`);
 
     const relatedMode = preset?.relatedLookup ?? "tags";
+
+    const sections = preset?.sections ?? {};
+    const includeBases = sections.bases !== false;
+    const includeTooltips = sections.tooltips !== false;
+    const includeRelated = sections.related !== false;
+    const includeTravel = sections.travelTimes !== false;
 	
 	let relatedBody = "";
 
@@ -6779,7 +6894,9 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       .sort((a, b) => a.dist - b.dist || a.file.path.localeCompare(b.file.path));
 
     try {
-      if (relatedMode === "off") {
+      if (!includeRelated) {
+        relatedBody = "*(disabled)*";
+      } else if (relatedMode === "off") {
         relatedBody = "*(disabled)*";
       } else if (relatedMode === "backlinks") {
         const maxPerNote = 50;
@@ -6886,7 +7003,11 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     const distLabel = this.formatPingDistanceLabel(radius, unit, customUnitId);
     const defaultTitle = `# Party pin: ${preset?.name || "Party"} (${distLabel})`;
 
-    const tooltipBody = tooltipLines.join("\n");
+    const travelBody = includeTravel
+      ? this.buildPingTravelTimesTable(af.path, inRangeFiles, metersByPath)
+      : "*(disabled)*";
+
+    const tooltipBody = includeTooltips ? tooltipLines.join("\n") : "*(disabled)*";
 
     await this.app.vault.process(af, (text) => {
       const next = this.buildPingNoteText(text, {
@@ -6894,6 +7015,11 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         baseYamlFallback,
         tooltipBody,
         relatedBody,
+        travelBody,
+        includeBases,
+        includeTooltips,
+        includeRelated,
+        includeTravel,
       });
       return next === text ? text : next;
     });
@@ -6958,20 +7084,19 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       rows,
       (updated) => {
         if (!this.data) return;
-        this.data.pinSizeOverrides ??= {};
-        const existing = this.data.pinSizeOverrides;
+        const allowed = new Set(rows.map((r) => r.iconKey));
+        const next: Record<string, number> = {};
 
-        // Merge updates; keep unknown keys as they are
-        for (const key of Object.keys(updated)) {
+        for (const key of allowed) {
           const val = updated[key];
           if (typeof val === "number" && Number.isFinite(val) && val > 0) {
-            existing[key] = val;
-          } else {
-            delete existing[key];
+            next[key] = val;
           }
         }
 
-        if (Object.keys(existing).length === 0) {
+        if (Object.keys(next).length > 0) {
+          this.data.pinSizeOverrides = next;
+        } else {
           delete this.data.pinSizeOverrides;
         }
 
@@ -8204,13 +8329,44 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       }
 
       host.addEventListener("click", (ev) => {
+        if (this.measuring || this.calibrating) return;
+
         ev.stopPropagation();
         if (this.suppressClickMarkerId === m.id || this.dragMoved) return;
         if (m.type === "sticker") return;
         this.openMarkerLink(m);
       });
+	  
+      host.addEventListener("mousedown", (ev: MouseEvent) => {
+        if (ev.button !== 1) return;
+        if (!this.plugin.settings.middleClickOpensLinkInNewTab) return;
+        if (this.measuring || this.calibrating) return;
+        if (m.type === "sticker") return;
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+	  
+      host.addEventListener("auxclick", (ev: MouseEvent) => {
+        if (ev.button !== 1) return;
+        if (!this.plugin.settings.middleClickOpensLinkInNewTab) return;
+        if (this.measuring || this.calibrating) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (this.suppressClickMarkerId === m.id || this.dragMoved) return;
+        if (m.type === "sticker") return;
+        this.openMarkerLink(m, { newTab: true });
+      });
 
       host.addEventListener("pointerdown", (e: PointerEvent) => {
+        if (this.measuring || this.calibrating) return;
+
+        if (e.button === 1 && this.plugin.settings.middleClickOpensLinkInNewTab) {
+          if (m.type === "sticker") return;
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
         e.stopPropagation();
         if (e.button !== 0) return;
         if (this.isLayerLocked(m.layer)) return;
@@ -8473,6 +8629,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
   private onMarkerEnter(ev: MouseEvent, m: Marker, hostEl: HTMLElement): void {
     if (m.type === "sticker") return;
+	if (this.measuring || this.calibrating) return;
 
     let link: string | undefined;
     let hoverOverride = false;
@@ -8757,9 +8914,13 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     }
   }
   
-  private openMarkerLink(m: Marker): void {
+  private openMarkerLink(m: Marker, opts?: { newTab?: boolean }): void {
     const link = this.getSwapEffectiveLink(m)?.trim();
     if (!link) return;
+    if (opts?.newTab) {
+      this.openLinkInNewTab(link);
+      return;
+    }
     void this.app.workspace.openLinkText(link, this.cfg.sourcePath);
   }
 

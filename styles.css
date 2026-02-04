@@ -1292,17 +1292,35 @@ body.zm-cursor-resize-nesw {
 }
 
 .zm-text-guide-line {
-  stroke: var(--text-accent);
-  stroke-width: 1px;
+  stroke: var(--text-muted);
+  stroke-width: 1.5px;
   vector-effect: non-scaling-stroke;
-  opacity: 0.35;
+  opacity: 0.7;
 }
 
 .zm-text-guide-draft {
-  stroke: var(--text-accent);
-  stroke-width: 2px;
+  stroke: var(--text-muted);
+  stroke-width: 2.5px;
   vector-effect: non-scaling-stroke;
+  opacity: 0.95;
+}
+
+.zm-text-guide--active.zm-text-guide-rect {
+  stroke: var(--text-error, #d23c3c);
+  stroke-width: 2px;
   opacity: 0.9;
+}
+
+.zm-text-guide--active.zm-text-guide-line {
+  stroke: var(--text-error, #d23c3c);
+  stroke-width: 1.8px;
+  opacity: 0.95;
+}
+
+.zm-text-guide--active.zm-text-guide-draft {
+  stroke: var(--text-error, #d23c3c);
+  stroke-width: 1.8px;
+  opacity: 1;
 }
 
 /* Inline editor (inputs positioned on baselines) */

@@ -149,6 +149,7 @@ const DEFAULT_SETTINGS: ZoomMapSettingsExtended = {
   preferCanvasImagesWhenCaching: false, 
   svgRasterMaxScale: 8,
   showImageIconPreviewInSettings: false,
+  middleClickOpensLinkInNewTab: false,
 };
 
 /* ---------------- YAML parsing helpers ---------------- */
@@ -795,6 +796,7 @@ export default class ZoomMapPlugin extends Plugin {
     this.settings.preferCanvasImagesWhenCaching ??= false;
 	this.settings.svgRasterMaxScale ??= 8;
 	this.settings.showImageIconPreviewInSettings ??= false;
+	this.settings.middleClickOpensLinkInNewTab ??= false;
     // Icons: collection filter toggle
     for (const ico of (this.settings.icons ?? [])) {
       if (typeof (ico as { inCollections?: unknown }).inCollections !== "boolean") {
@@ -1550,60 +1552,8 @@ class ZoomMapSettingTab extends PluginSettingTab {
         }).open();
       }),
     );
-
-    // SVG icons section
-    new Setting(containerEl).setName("SVG icons").setHeading();
 	
-    // ---- Add SVG icon (MOVE ABOVE LIST) ----
-    const addSvgSetting = new Setting(containerEl)
-      .setName("Add SVG icon or sort the list")
-      .setDesc("Create a pin icon from an SVG file in the configured folder, or sort the SVG icon list alphabetically.");
-
-    const infoIcon = addSvgSetting.controlEl.createDiv({ cls: "zoommap-info-icon" });
-    setIcon(infoIcon, "info");
-    infoIcon.setAttr(
-      "title",
-      "Rendering many SVG files in the picker can cause noticeable delays while all previews are generated. Once the icons are cached, searching and adding should feel much faster.",
-    );
-	
-    addSvgSetting.addButton((b) =>
-      b.setButtonText("Sort a→z").onClick(() => {
-        const icons = this.plugin.settings.icons ?? [];
-        if (icons.length === 0) return;
-
-        // Only sorts SVG icons and keeps image icons in place.
-        const svgIcons = icons.filter((i) => isSvgIcon(i));
-        if (svgIcons.length <= 1) {
-          new Notice("No SVG icons to sort.", 2000);
-          return;
-        }
-
-        const keyOf = (i: IconProfile) => String(i.key ?? "").trim();
-        const sorted = [...svgIcons].sort((a, b) =>
-          keyOf(a).localeCompare(keyOf(b), undefined, { sensitivity: "base", numeric: true }),
-        );
-
-        let j = 0;
-        const next = icons.map((ico) => (isSvgIcon(ico) ? sorted[j++] : ico));
-
-        this.plugin.settings.icons = next;
-        void this.plugin.saveSettings().then(() => {
-          renderIcons?.();
-          new Notice(`Sorted ${sorted.length} SVG icons.`, 2000);
-        });
-      }),
-    );
-
-    addSvgSetting.addButton((b) =>
-      b.setButtonText("Add SVG icon").onClick(() => {
-        const ext = this.plugin.settings as ZoomMapSettingsExtended;
-        const folder = ext.faFolderPath?.trim() || "ZoomMap/SVGs";
-
-        new FaIconPickerModal(this.app, folder, (file: TFile) => {
-          void this.addFontAwesomeIcon(file);
-        }).open();
-      }),
-    );
+	new Setting(containerEl).setName("SVG icon sources").setHeading();
 
     const svgFolderRow = new Setting(containerEl)
       .setName("SVG icon folder in vault")
@@ -1744,6 +1694,57 @@ class ZoomMapSettingTab extends PluginSettingTab {
       const lower = src.toLowerCase();
       return lower.startsWith("data:image/svg+xml") || lower.endsWith(".svg");
     };
+	
+	new Setting(containerEl).setName("SVG icons").setHeading();
+	
+    const addSvgSetting = new Setting(containerEl)
+      .setName("Add SVG icon or sort the list")
+      .setDesc("Create a pin icon from an SVG file in the configured folder, or sort the SVG icon list alphabetically.");
+
+    const infoIcon = addSvgSetting.controlEl.createDiv({ cls: "zoommap-info-icon" });
+    setIcon(infoIcon, "info");
+    infoIcon.setAttr(
+      "title",
+      "Rendering many SVG files in the picker can cause noticeable delays while all previews are generated. Once the icons are cached, searching and adding should feel much faster.",
+    );
+
+    addSvgSetting.addButton((b) =>
+      b.setButtonText("Sort a→z").onClick(() => {
+        const icons = this.plugin.settings.icons ?? [];
+        if (icons.length === 0) return;
+
+        const svgIcons = icons.filter((i) => isSvgIcon(i));
+        if (svgIcons.length <= 1) {
+          new Notice("No SVG icons to sort.", 2000);
+          return;
+        }
+
+        const keyOf = (i: IconProfile) => String(i.key ?? "").trim();
+        const sorted = [...svgIcons].sort((a, b) =>
+          keyOf(a).localeCompare(keyOf(b), undefined, { sensitivity: "base", numeric: true }),
+        );
+
+        let j = 0;
+        const next = icons.map((ico) => (isSvgIcon(ico) ? sorted[j++] : ico));
+
+        this.plugin.settings.icons = next;
+        void this.plugin.saveSettings().then(() => {
+          renderIcons?.();
+          new Notice(`Sorted ${sorted.length} SVG icons.`, 2000);
+        });
+      }),
+    );
+
+    addSvgSetting.addButton((b) =>
+      b.setButtonText("Add SVG icon").onClick(() => {
+        const ext = this.plugin.settings as ZoomMapSettingsExtended;
+        const folder = ext.faFolderPath?.trim() || "ZoomMap/SVGs";
+
+        new FaIconPickerModal(this.app, folder, (file: TFile) => {
+          void this.addFontAwesomeIcon(file);
+        }).open();
+      }),
+    );
 
     // SVG icons table header
     const svgIconsHead = containerEl.createDiv({ cls: "zm-icons-grid-head zm-grid" });

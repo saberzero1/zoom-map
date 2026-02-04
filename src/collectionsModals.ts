@@ -440,6 +440,12 @@ export class CollectionEditorModal extends Modal {
           relatedLookup: "tags",
           searchLayersMode: "all",
           searchLayerNames: [],
+          sections: {
+            bases: true,
+            related: true,
+            tooltips: true,
+            travelTimes: true,
+          },
         };
         pings.push(pp);
         renderPings();
@@ -737,7 +743,8 @@ class PingPresetEditorModal extends Modal {
 
     this.working.relatedLookup ??= "tags";
     this.working.searchLayersMode ??= "all";
-    this.working.searchLayerNames ??= [];	
+    this.working.searchLayerNames ??= [];
+	this.working.sections ??= {};
   }
 
   onOpen(): void {
@@ -761,6 +768,42 @@ class PingPresetEditorModal extends Modal {
       d.setValue(this.working.iconKey ?? "");
       d.onChange((v) => { this.working.iconKey = v || undefined; });
     });
+	
+    contentEl.createEl("h3", { text: "Generated sections" });
+
+    const sec = (this.working.sections ??= {});
+
+    new Setting(contentEl)
+      .setName("Base table (embedded base)")
+      .addToggle((tg) => {
+        tg.setValue(sec.bases !== false).onChange((on) => {
+          sec.bases = on ? true : false;
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Related notes section (tags/backlinks)")
+      .addToggle((tg) => {
+        tg.setValue(sec.related !== false).onChange((on) => {
+          sec.related = on ? true : false;
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Unlinked markers section")
+      .addToggle((tg) => {
+        tg.setValue(sec.tooltips !== false).onChange((on) => {
+          sec.tooltips = on ? true : false;
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Travel times table")
+      .addToggle((tg) => {
+        tg.setValue(sec.travelTimes !== false).onChange((on) => {
+          sec.travelTimes = on ? true : false;
+        });
+      });
 
     new Setting(contentEl)
       .setName("Related notes lookup")

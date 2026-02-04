@@ -88,6 +88,17 @@ export class PreferencesModal extends Modal {
           await this.plugin.saveSettings();
         });
       });
+	  
+    new Setting(contentEl)
+      .setName("Middle click pins opens linked note in new tab")
+      .setDesc("When enabled: middle click on a pin opens its linked note in a new tab.")
+      .addToggle((toggle) => {
+        toggle.setValue(!!this.plugin.settings.middleClickOpensLinkInNewTab).onChange(async (value) => {
+          this.plugin.settings.middleClickOpensLinkInNewTab = value;
+          await this.plugin.saveSettings();
+        });
+      });
+	  
     new Setting(contentEl)
       .setName("Max SVG raster scale")
       .setDesc("Controls the maximum raster lod for SVG base images. Higher = sharper at high zoom, but more RAM and slower upgrades.")
