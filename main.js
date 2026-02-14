@@ -1631,6 +1631,7 @@ var ViewEditorModal = class extends import_obsidian10.Modal {
   constructor(app, initial, onResult, opts) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
     super(app);
+    this.markersInputEl = null;
     this.cfg = JSON.parse(JSON.stringify(initial));
     this.onResult = onResult;
     this.onPreview = opts == null ? void 0 : opts.onPreview;
@@ -1779,12 +1780,15 @@ var ViewEditorModal = class extends import_obsidian10.Modal {
       var _a;
       t.setPlaceholder("Path to markers.json");
       t.setValue((_a = this.cfg.markersPath) != null ? _a : "");
+      this.markersInputEl = t.inputEl;
       t.onChange((v) => {
         this.cfg.markersPath = v.trim();
       });
     }).addButton(
       (b) => b.setButtonText("Use first base").onClick(() => {
+        var _a;
         this.autoFillMarkersPathFromFirstBase(true);
+        if (this.markersInputEl) this.markersInputEl.value = (_a = this.cfg.markersPath) != null ? _a : "";
       })
     );
     contentEl.createEl("h3", { text: "Marker layers (names)" });
@@ -2039,6 +2043,7 @@ var ViewEditorModal = class extends import_obsidian10.Modal {
   }
   onClose() {
     this.contentEl.empty();
+    this.markersInputEl = null;
   }
   normalizeZoomRange() {
     let { minZoom, maxZoom } = this.cfg;
@@ -2467,6 +2472,7 @@ var CollectionEditorModal = class extends import_obsidian11.Modal {
         preset.defaultHud = updated.defaultHud;
         preset.defaultScaleLikeSticker = updated.defaultScaleLikeSticker;
         preset.hoverPopover = updated.hoverPopover;
+        preset.layerName = updated.layerName;
       }
     );
     modal.open();
@@ -2493,6 +2499,14 @@ var SwapFramesEditorModal = class extends import_obsidian11.Modal {
       t.setValue((_a = this.working.name) != null ? _a : "");
       t.onChange((v) => {
         this.working.name = v.trim() || this.working.name;
+      });
+    });
+    new import_obsidian11.Setting(contentEl).setName("Marker layer name (optional)").setDesc("If set: newly placed swap pins will be created in this marker layer (created if missing).").addText((t) => {
+      var _a;
+      t.setPlaceholder("Layer");
+      t.setValue((_a = this.working.layerName) != null ? _a : "");
+      t.onChange((v) => {
+        this.working.layerName = v.trim() || void 0;
       });
     });
     new import_obsidian11.Setting(contentEl).setName("Place as hud pin by default").addToggle((tg) => {
@@ -5913,6 +5927,10 @@ var MapInstance = class extends import_obsidian16.Component {
     this.updateMeasureHud();
     this.renderMeasure();
   }
+  clearMeasurementFromCommand() {
+    if (!this.ready) return;
+    this.clearMeasure();
+  }
   getMetersPerPixel() {
     var _a;
     const base = this.getActiveBasePath();
@@ -6875,7 +6893,16 @@ var MapInstance = class extends import_obsidian16.Component {
   }
   addSwapPinHere(preset, vx, vy) {
     if (!this.data) return;
-    const layerId = this.getPreferredNewMarkerLayerId();
+    let layerId = this.getPreferredNewMarkerLayerId();
+    if (preset.layerName) {
+      const found = this.data.layers.find((l) => l.name === preset.layerName);
+      if (found) layerId = found.id;
+      else {
+        const id = generateId("layer");
+        this.data.layers.push({ id, name: preset.layerName, visible: true, locked: false });
+        layerId = id;
+      }
+    }
     const isHud = !!preset.defaultHud;
     const scaleLike = !!preset.defaultScaleLikeSticker;
     const marker = {
@@ -10238,6 +10265,7 @@ ${(0, import_obsidian16.stringifyYaml)(fm).trimEnd()}
                     preset.defaultHud = updated.defaultHud;
                     preset.defaultScaleLikeSticker = updated.defaultScaleLikeSticker;
                     preset.hoverPopover = updated.hoverPopover;
+                    preset.layerName = updated.layerName;
                     void this.plugin.saveSettings();
                     this.renderMarkersOnly();
                   }
@@ -12880,6 +12908,16 @@ var ZoomMapPlugin = class extends import_obsidian22.Plugin {
         const map = this.activeMap;
         if (!map) return false;
         if (!checking) map.toggleMeasureFromCommand();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "clear-measurement",
+      name: "Clear measurement",
+      checkCallback: (checking) => {
+        const map = this.activeMap;
+        if (!map) return false;
+        if (!checking) map.clearMeasurementFromCommand();
         return true;
       }
     });

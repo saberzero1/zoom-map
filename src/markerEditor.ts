@@ -4,7 +4,7 @@ import type { Marker, MarkerFileData } from "./markerStore";
 import type ZoomMapPlugin from "./main";
 
 type SwapPinFrameLite = { iconKey: string; link?: string };
-type SwapPinPresetLite = { id: string; name: string; frames: SwapPinFrameLite[] };
+type SwapPinPresetLite = { id: string; name: string; frames: SwapPinFrameLite[]; layerName?: string };
 
 interface LinkSuggestion {
   label: string;

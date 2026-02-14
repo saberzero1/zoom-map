@@ -546,6 +546,10 @@ button.zm-btn-sm {
   box-shadow: var(--shadow-l);
   padding: 4px;
   user-select: none;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .zm-submenu {

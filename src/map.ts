@@ -98,6 +98,7 @@ export interface SwapPinPreset {
   defaultScaleLikeSticker?: boolean;
   defaultHud?: boolean;
   hoverPopover?: boolean;
+  layerName?: string;
 }
 
 export interface BaseCollectionBinding {
@@ -3306,6 +3307,11 @@ export class MapInstance extends Component {
     this.updateMeasureHud();
     this.renderMeasure();
   }
+  
+  public clearMeasurementFromCommand(): void {
+    if (!this.ready) return;
+    this.clearMeasure();
+  }
 
   private getMetersPerPixel(): number | undefined {
     const base = this.getActiveBasePath();
@@ -4477,7 +4483,16 @@ this.viewDragDist = 0;
   private addSwapPinHere(preset: SwapPinPreset, vx: number, vy: number): void {
     if (!this.data) return;
 
-    const layerId = this.getPreferredNewMarkerLayerId();
+    let layerId = this.getPreferredNewMarkerLayerId();
+    if (preset.layerName) {
+      const found = this.data.layers.find((l) => l.name === preset.layerName);
+      if (found) layerId = found.id;
+      else {
+        const id = generateId("layer");
+        this.data.layers.push({ id, name: preset.layerName, visible: true, locked: false });
+        layerId = id;
+      }
+    }
     const isHud = !!preset.defaultHud;
     const scaleLike = !!preset.defaultScaleLikeSticker;
 
@@ -8504,6 +8519,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
                     preset.defaultScaleLikeSticker =
                       updated.defaultScaleLikeSticker;
                     preset.hoverPopover = updated.hoverPopover;
+					preset.layerName = updated.layerName;
                     void this.plugin.saveSettings();
                     this.renderMarkersOnly();
                   },

@@ -490,6 +490,7 @@ export class CollectionEditorModal extends Modal {
         preset.defaultHud = updated.defaultHud;
         preset.defaultScaleLikeSticker = updated.defaultScaleLikeSticker;
         preset.hoverPopover = updated.hoverPopover;
+		preset.layerName = updated.layerName;
       },
     );
     modal.open();
@@ -533,6 +534,15 @@ export class SwapFramesEditorModal extends Modal {
         t.onChange((v) => {
           this.working.name = v.trim() || this.working.name;
         });
+      });
+	  
+    new Setting(contentEl)
+      .setName("Marker layer name (optional)")
+      .setDesc("If set: newly placed swap pins will be created in this marker layer (created if missing).")
+      .addText((t) => {
+        t.setPlaceholder("Layer");
+        t.setValue(this.working.layerName ?? "");
+        t.onChange((v) => { this.working.layerName = v.trim() || undefined; });
       });
 
     new Setting(contentEl)

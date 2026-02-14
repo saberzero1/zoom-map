@@ -471,6 +471,17 @@ export default class ZoomMapPlugin extends Plugin {
         return true;
       },
     });
+	
+    this.addCommand({
+      id: "clear-measurement",
+      name: "Clear measurement",
+      checkCallback: (checking) => {
+        const map = this.activeMap;
+        if (!map) return false;
+        if (!checking) map.clearMeasurementFromCommand();
+        return true;
+      },
+    });
 
     this.registerMarkdownCodeBlockProcessor(
       "zoommap",

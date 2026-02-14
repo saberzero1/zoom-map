@@ -43,6 +43,8 @@ type ViewEditorCallback = (result: ViewEditorResult) => void;
 type ViewEditorPreviewCallback = (config: ViewEditorConfig) => void;
 
 export class ViewEditorModal extends Modal {
+  private markersInputEl: HTMLInputElement | null = null;
+
   private cfg: ViewEditorConfig;
   private onResult: ViewEditorCallback;
   private onPreview?: ViewEditorPreviewCallback;
@@ -230,6 +232,7 @@ export class ViewEditorModal extends Modal {
       .addText((t) => {
         t.setPlaceholder("Path to markers.json");
         t.setValue(this.cfg.markersPath ?? "");
+		this.markersInputEl = t.inputEl;
         t.onChange((v) => {
           this.cfg.markersPath = v.trim();
         });
@@ -239,6 +242,7 @@ export class ViewEditorModal extends Modal {
           .setButtonText("Use first base")
           .onClick(() => {
             this.autoFillMarkersPathFromFirstBase(true);
+			if (this.markersInputEl) this.markersInputEl.value = this.cfg.markersPath ?? "";
           }),
       );
 
@@ -587,6 +591,7 @@ export class ViewEditorModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+	this.markersInputEl = null;
   }
 
   private normalizeZoomRange(): void {
