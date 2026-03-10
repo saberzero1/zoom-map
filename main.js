@@ -3735,7 +3735,9 @@ var DicePinModal = class extends import_obsidian17.Modal {
     this.value = {
       iconKey: defaultIconKey,
       rolls: rolls.length ? rolls : [{ count: 1, sides: 20 }],
-      render3d: !!initial.render3d
+      render3d: !!initial.render3d,
+      scaleLikeSticker: !!initial.scaleLikeSticker,
+      placeAsHudPin: !!initial.placeAsHudPin
     };
   }
   onOpen() {
@@ -3755,6 +3757,14 @@ var DicePinModal = class extends import_obsidian17.Modal {
     new import_obsidian17.Setting(contentEl).setName("Graphical roll (3d)").setDesc("Uses dice roller\u2019s dice view (if installed).").addToggle((tg) => {
       tg.setValue(this.value.render3d);
       tg.onChange((on) => this.value.render3d = on);
+    });
+    new import_obsidian17.Setting(contentEl).setName("Scale like sticker").setDesc("Pin scales with the map (no inverse wrapper).").addToggle((tg) => {
+      tg.setValue(this.value.scaleLikeSticker);
+      tg.onChange((on) => this.value.scaleLikeSticker = on);
+    });
+    new import_obsidian17.Setting(contentEl).setName("Place as hud pin").setDesc("Places the pin in viewport space (stays fixed in the window).").addToggle((tg) => {
+      tg.setValue(this.value.placeAsHudPin);
+      tg.onChange((on) => this.value.placeAsHudPin = on);
     });
     const formulaRow = new import_obsidian17.Setting(contentEl).setName("Formula");
     const formulaEl = formulaRow.controlEl.createEl("code");
@@ -3831,7 +3841,9 @@ var DicePinModal = class extends import_obsidian17.Modal {
         value: {
           iconKey: ((_b = this.value.iconKey) != null ? _b : "").trim(),
           rolls: cleaned,
-          render3d: !!this.value.render3d
+          render3d: !!this.value.render3d,
+          scaleLikeSticker: !!this.value.scaleLikeSticker,
+          placeAsHudPin: !!this.value.placeAsHudPin
         }
       });
     };
@@ -3999,6 +4011,12 @@ var MapInstance = class extends import_obsidian18.Component {
   constructor(app, plugin, el, cfg) {
     var _a, _b;
     super();
+    this.drawEditDrawingId = null;
+    this.drawEditMode = null;
+    this.drawEditPointIndex = null;
+    this.drawEditHandleKind = null;
+    this.drawEditPointerId = null;
+    this.drawEditOriginalDrawing = null;
     this.zoomHudTimer = null;
     this.initialLayoutDone = false;
     this.initialViewApplied = false;
@@ -4407,6 +4425,7 @@ var MapInstance = class extends import_obsidian18.Component {
     this.applyTransform(z, tx, ty);
     this.initialViewApplied = true;
     this.captureViewIfVisible();
+    this.renderDrawingEditHandles();
   }
   captureViewIfVisible() {
     if (!this.imgW || !this.imgH) return;
@@ -5019,6 +5038,7 @@ var MapInstance = class extends import_obsidian18.Component {
     this.applyViewportInset();
     this.hudMarkersEl = this.hudClipEl.createDiv({ cls: "zm-hud-markers" });
     this.measureHud = this.hudClipEl.createDiv({ cls: "zm-measure-hud" });
+    this.drawEditHudEl = this.hudClipEl.createDiv({ cls: "zm-draw-edit" });
     this.zoomHud = this.hudClipEl.createDiv({ cls: "zm-zoom-hud" });
     this.registerDomEvent(this.viewportEl, "wheel", (e) => {
       const t = e.target;
@@ -5039,7 +5059,7 @@ var MapInstance = class extends import_obsidian18.Component {
       if (this.activePointers.has(e.pointerId)) this.activePointers.delete(e.pointerId);
       if (this.pinchActive && this.activePointers.size < 2) this.endPinch();
       e.preventDefault();
-      this.onPointerUp();
+      this.onPointerUp(e);
     });
     this.registerDomEvent(window, "pointercancel", (e) => {
       if (this.activePointers.has(e.pointerId)) this.activePointers.delete(e.pointerId);
@@ -5064,6 +5084,20 @@ var MapInstance = class extends import_obsidian18.Component {
     });
     this.registerDomEvent(window, "keydown", (e) => {
       if (e.key !== "Escape") return;
+      if (this.textMode === "move") {
+        this.finishTextLayerMove(false);
+        this.textMode = null;
+        this.activeTextLayerId = null;
+        this.renderTextDraft();
+        this.renderTextLayers();
+        this.closeMenu();
+        return;
+      }
+      if (this.drawEditDrawingId) {
+        this.stopEditDrawingGeometry(false);
+        this.closeMenu();
+        return;
+      }
       if (this.textMode === "move") {
         this.finishTextLayerMove(false);
         this.textMode = null;
@@ -5561,6 +5595,285 @@ var MapInstance = class extends import_obsidian18.Component {
     this.drawSvg.appendChild(this.drawStaticLayer);
     this.drawDraftLayer = document.createElementNS(ns, "g");
     this.drawSvg.appendChild(this.drawDraftLayer);
+  }
+  getDrawingById(id) {
+    var _a, _b;
+    const list = (_b = (_a = this.data) == null ? void 0 : _a.drawings) != null ? _b : [];
+    for (const d of list) {
+      if (d.id === id) return d;
+    }
+    return null;
+  }
+  getEditableDrawingPoints(d) {
+    if (d.kind === "polygon" && Array.isArray(d.polygon)) return d.polygon;
+    if (d.kind === "polyline" && Array.isArray(d.polyline)) return d.polyline;
+    return null;
+  }
+  getEditableDrawingMode(d) {
+    if (d.kind === "polygon" || d.kind === "polyline") return "points";
+    if (d.kind === "rect") return "rect";
+    if (d.kind === "circle") return "circle";
+    return null;
+  }
+  startEditDrawingGeometry(d) {
+    const mode = this.getEditableDrawingMode(d);
+    if (!mode) {
+      new import_obsidian18.Notice("This drawing cannot be edited right now.", 2500);
+      return;
+    }
+    this.stopTextEdit(true);
+    this.finishTextLayerMove(false);
+    this.stopEditDrawingGeometry(true);
+    this.measuring = false;
+    this.calibrating = false;
+    this.drawingMode = null;
+    this.drawRectStart = null;
+    this.drawCircleCenter = null;
+    this.drawPolygonPoints = [];
+    if (this.drawDraftLayer) this.drawDraftLayer.innerHTML = "";
+    this.drawEditDrawingId = d.id;
+    this.drawEditMode = mode;
+    this.drawEditPointIndex = null;
+    this.drawEditHandleKind = null;
+    this.drawEditPointerId = null;
+    this.drawEditOriginalDrawing = JSON.parse(JSON.stringify(d));
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+    if (mode === "points") {
+      new import_obsidian18.Notice("Edit points: drag handles, drag green midpoint handles to add points, double-click a point to delete it. Press esc to cancel.", 6e3);
+    } else if (mode === "rect") {
+      new import_obsidian18.Notice("Edit rectangle: drag corner handles. Press esc to cancel.", 4e3);
+    } else {
+      new import_obsidian18.Notice("Edit circle: drag center or radius handle. Press esc to cancel.", 4e3);
+    }
+  }
+  stopEditDrawingGeometry(commit) {
+    if (!this.drawEditDrawingId) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!commit && d && this.drawEditOriginalDrawing) {
+      d.rect = this.drawEditOriginalDrawing.rect ? { ...this.drawEditOriginalDrawing.rect } : void 0;
+      d.circle = this.drawEditOriginalDrawing.circle ? { ...this.drawEditOriginalDrawing.circle } : void 0;
+      d.polygon = this.drawEditOriginalDrawing.polygon ? this.drawEditOriginalDrawing.polygon.map((p) => ({ x: p.x, y: p.y })) : void 0;
+      d.polyline = this.drawEditOriginalDrawing.polyline ? this.drawEditOriginalDrawing.polyline.map((p) => ({ x: p.x, y: p.y })) : void 0;
+    }
+    this.drawEditDrawingId = null;
+    this.drawEditMode = null;
+    this.drawEditPointIndex = null;
+    this.drawEditHandleKind = null;
+    this.drawEditPointerId = null;
+    this.drawEditOriginalDrawing = null;
+    if (commit) void this.saveDataSoon();
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+  }
+  insertPointIntoEditedDrawing(segmentIndex, p) {
+    if (!this.drawEditDrawingId) return null;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return null;
+    const pts = this.getEditableDrawingPoints(d);
+    if (!pts) return null;
+    const insertAt = clamp(segmentIndex + 1, 0, pts.length);
+    pts.splice(insertAt, 0, {
+      x: clamp(p.x, 0, 1),
+      y: clamp(p.y, 0, 1)
+    });
+    return insertAt;
+  }
+  deletePointFromEditedDrawing(pointIndex) {
+    if (!this.drawEditDrawingId) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return;
+    const pts = this.getEditableDrawingPoints(d);
+    if (!pts) return;
+    const minPoints = d.kind === "polygon" ? 3 : 2;
+    if (pts.length <= minPoints) {
+      new import_obsidian18.Notice(`This ${d.kind} needs at least ${minPoints} points.`, 2e3);
+      return;
+    }
+    pts.splice(pointIndex, 1);
+    if (this.drawEditPointIndex === pointIndex) this.drawEditPointIndex = null;
+    else if (this.drawEditPointIndex !== null && this.drawEditPointIndex > pointIndex) this.drawEditPointIndex -= 1;
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+  }
+  updateEditedDrawingHandleFromClient(clientX, clientY) {
+    if (!this.drawEditDrawingId) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return;
+    const vpRect = this.viewportEl.getBoundingClientRect();
+    const vx = clientX - vpRect.left;
+    const vy = clientY - vpRect.top;
+    const wx = (vx - this.tx) / this.scale;
+    const wy = (vy - this.ty) / this.scale;
+    const nx = clamp(wx / this.imgW, 0, 1);
+    const ny = clamp(wy / this.imgH, 0, 1);
+    if (this.drawEditMode === "points") {
+      const pts = this.getEditableDrawingPoints(d);
+      if (!pts || this.drawEditPointIndex === null) return;
+      if (this.drawEditPointIndex < 0 || this.drawEditPointIndex >= pts.length) return;
+      pts[this.drawEditPointIndex].x = nx;
+      pts[this.drawEditPointIndex].y = ny;
+    } else if (this.drawEditMode === "rect" && d.rect) {
+      const key = this.drawEditHandleKind;
+      if (key === "x0y0") {
+        d.rect.x0 = nx;
+        d.rect.y0 = ny;
+      } else if (key === "x1y0") {
+        d.rect.x1 = nx;
+        d.rect.y0 = ny;
+      } else if (key === "x1y1") {
+        d.rect.x1 = nx;
+        d.rect.y1 = ny;
+      } else if (key === "x0y1") {
+        d.rect.x0 = nx;
+        d.rect.y1 = ny;
+      }
+    } else if (this.drawEditMode === "circle" && d.circle) {
+      const key = this.drawEditHandleKind;
+      if (key === "center") {
+        d.circle.cx = nx;
+        d.circle.cy = ny;
+      } else if (key === "radius") {
+        const cxPx = d.circle.cx * this.imgW;
+        const cyPx = d.circle.cy * this.imgH;
+        const px = nx * this.imgW;
+        const py = ny * this.imgH;
+        const rPx = Math.hypot(px - cxPx, py - cyPx);
+        d.circle.r = Math.max(1 / Math.max(this.imgW, this.imgH), rPx / Math.max(this.imgW, this.imgH));
+      }
+    }
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+  }
+  isEditedDrawingCurrentlyVisible(d) {
+    var _a, _b;
+    if (!d.visible) return false;
+    const layer = ((_b = (_a = this.data) == null ? void 0 : _a.drawLayers) != null ? _b : []).find((l) => l.id === d.layerId);
+    if (!layer || !layer.visible) return false;
+    const activeBase = this.getActiveBasePath();
+    if (layer.boundBase && layer.boundBase !== activeBase) return false;
+    return true;
+  }
+  renderDrawingEditHandles() {
+    if (!this.drawEditHudEl) return;
+    this.drawEditHudEl.empty();
+    if (!this.drawEditDrawingId || !this.data || !this.drawEditMode) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return;
+    if (!this.isEditedDrawingCurrentlyVisible(d)) return;
+    const startDrag = (pointIndex, handleKind, pointerId) => {
+      this.drawEditPointIndex = pointIndex;
+      this.drawEditHandleKind = handleKind;
+      this.drawEditPointerId = pointerId;
+      this.plugin.setActiveMap(this);
+      this.renderDrawingEditHandles();
+    };
+    if (this.drawEditMode === "points") {
+      const pts = this.getEditableDrawingPoints(d);
+      if (!pts || pts.length === 0) return;
+      for (let i = 0; i < pts.length; i += 1) {
+        const p = pts[i];
+        const sx = this.tx + p.x * this.imgW * this.scale;
+        const sy = this.ty + p.y * this.imgH * this.scale;
+        const h = this.drawEditHudEl.createDiv({ cls: "zm-draw-handle" });
+        if (this.drawEditPointIndex === i) h.classList.add("zm-draw-handle--active");
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = "Drag to move. Double click to delete.";
+        h.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startDrag(i, "point", e.pointerId);
+        });
+        h.addEventListener("dblclick", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.deletePointFromEditedDrawing(i);
+        });
+      }
+      const segCount = d.kind === "polygon" ? pts.length : Math.max(0, pts.length - 1);
+      for (let i = 0; i < segCount; i += 1) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        if (!a || !b) continue;
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const sx = this.tx + mx * this.imgW * this.scale;
+        const sy = this.ty + my * this.imgH * this.scale;
+        const h = this.drawEditHudEl.createDiv({ cls: "zm-draw-handle zm-draw-handle--add" });
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = "Drag to insert a new point.";
+        h.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const inserted = this.insertPointIntoEditedDrawing(i, { x: mx, y: my });
+          if (inserted === null) return;
+          startDrag(inserted, "point", e.pointerId);
+          this.renderDrawings();
+          this.renderDrawingEditHandles();
+        });
+      }
+      return;
+    }
+    if (this.drawEditMode === "rect" && d.rect) {
+      const corners = [
+        { key: "x0y0", x: d.rect.x0, y: d.rect.y0 },
+        { key: "x1y0", x: d.rect.x1, y: d.rect.y0 },
+        { key: "x1y1", x: d.rect.x1, y: d.rect.y1 },
+        { key: "x0y1", x: d.rect.x0, y: d.rect.y1 }
+      ];
+      for (const c of corners) {
+        const sx = this.tx + c.x * this.imgW * this.scale;
+        const sy = this.ty + c.y * this.imgH * this.scale;
+        const h = this.drawEditHudEl.createDiv({ cls: "zm-draw-handle" });
+        if (this.drawEditHandleKind === c.key) h.classList.add("zm-draw-handle--active");
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = "Drag to resize rectangle.";
+        h.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startDrag(null, c.key, e.pointerId);
+        });
+      }
+      return;
+    }
+    if (this.drawEditMode === "circle" && d.circle) {
+      const cxPx = d.circle.cx * this.imgW;
+      const cyPx = d.circle.cy * this.imgH;
+      const rPx = d.circle.r * Math.max(this.imgW, this.imgH);
+      const handles = [
+        {
+          key: "center",
+          cls: "zm-draw-handle zm-draw-handle--center",
+          xPx: cxPx,
+          yPx: cyPx,
+          title: "Drag to move circle center."
+        },
+        {
+          key: "radius",
+          cls: "zm-draw-handle zm-draw-handle--radius",
+          xPx: cxPx + rPx,
+          yPx: cyPx,
+          title: "Drag to change circle radius."
+        }
+      ];
+      for (const c of handles) {
+        const sx = this.tx + c.xPx * this.scale;
+        const sy = this.ty + c.yPx * this.scale;
+        const h = this.drawEditHudEl.createDiv({ cls: c.cls });
+        if (this.drawEditHandleKind === c.key) h.classList.add("zm-draw-handle--active");
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = c.title;
+        h.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startDrag(null, c.key, e.pointerId);
+        });
+      }
+    }
   }
   ensureTextData() {
     var _a, _b;
@@ -6879,6 +7192,7 @@ var MapInstance = class extends import_obsidian18.Component {
       this.fitToView();
       if (this.isCanvas()) this.renderCanvas();
       this.renderMarkersOnly();
+      this.renderDrawingEditHandles();
       return;
     }
     if (oldVw < 2 || oldVh < 2) {
@@ -6896,6 +7210,7 @@ var MapInstance = class extends import_obsidian18.Component {
       }
       if (this.isCanvas()) this.renderCanvas();
       this.renderMarkersOnly();
+      this.renderDrawingEditHandles();
       return;
     }
     const worldCx = (oldVw / 2 - this.tx) / this.scale;
@@ -6904,6 +7219,7 @@ var MapInstance = class extends import_obsidian18.Component {
     const tyNew = this.vh / 2 - worldCy * this.scale;
     this.applyTransform(this.scale, txNew, tyNew, true);
     this.renderMarkersOnly();
+    this.renderDrawingEditHandles();
     if (this.shouldUseSavedFrame() && this.cfg.resizable && this.cfg.resizeHandle === "native" && !this.userResizing) {
       if (!this.initialLayoutDone) this.initialLayoutDone = true;
       else if (this.isFrameVisibleEnough()) this.requestPersistFrame();
@@ -6975,6 +7291,15 @@ var MapInstance = class extends import_obsidian18.Component {
       const p = { x: clamp(wx / this.imgW, 0, 1), y: clamp(wy / this.imgH, 0, 1) };
       this.updateTextLayerMove(p);
       return;
+    }
+    if (this.drawEditPointerId !== null && e.pointerId === this.drawEditPointerId) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.updateEditedDrawingHandleFromClient(e.clientX, e.clientY);
+      return;
+    }
+    if (this.drawEditDrawingId) {
+      this.renderDrawingEditHandles();
     }
     if (e.pointerType === "touch") {
       if (this.draggingView || this.pinchActive) {
@@ -7087,8 +7412,16 @@ var MapInstance = class extends import_obsidian18.Component {
     this.panAccDy += dy;
     this.requestPanFrame();
   }
-  onPointerUp() {
+  onPointerUp(e) {
     var _a;
+    if (this.drawEditPointerId !== null && (!e || e.pointerId === this.drawEditPointerId)) {
+      this.drawEditPointerId = null;
+      this.drawEditPointIndex = null;
+      void this.saveDataSoon();
+      this.renderDrawings();
+      this.renderDrawingEditHandles();
+      return;
+    }
     if (this.textMoveDragging) {
       this.finishTextLayerMove(true);
       return;
@@ -7497,6 +7830,18 @@ var MapInstance = class extends import_obsidian18.Component {
     const idx = (rawIndex % count + count) % count;
     return preset.frames[idx];
   }
+  worldNormToViewportPx(nx, ny) {
+    return {
+      x: this.tx + nx * this.imgW * this.scale,
+      y: this.ty + ny * this.imgH * this.scale
+    };
+  }
+  viewportPxToWorldNorm(hx, hy) {
+    return {
+      x: clamp((hx - this.tx) / this.scale / this.imgW, 0, 1),
+      y: clamp((hy - this.ty) / this.scale / this.imgH, 0, 1)
+    };
+  }
   getPingPresetsSplitForActive() {
     const { pingBase, pingGlobal } = this.computeCollectionSets();
     return { pingBase, pingGlobal };
@@ -7604,14 +7949,20 @@ Result: ${formatDiceApiResult(res == null ? void 0 : res.result)}`.trim(), 5e3);
 ${local.details}
 Total: ${local.total}`, 6e3);
   }
-  addDicePinHere(nx, ny) {
+  addDicePinHere(nx, ny, vx, vy) {
     if (!this.data) return;
     const iconKey = this.plugin.settings.defaultIconKey;
     const layerId = this.getPreferredNewMarkerLayerId();
     new DicePinModal(
       this.app,
       this.plugin,
-      { iconKey, rolls: [{ count: 1, sides: 20 }], render3d: false },
+      {
+        iconKey,
+        rolls: [{ count: 1, sides: 20 }],
+        render3d: false,
+        scaleLikeSticker: !!this.plugin.settings.defaultScaleLikeSticker,
+        placeAsHudPin: false
+      },
       (res) => {
         if (!this.data) return;
         if (res.action !== "save") return;
@@ -7624,8 +7975,18 @@ Total: ${local.total}`, 6e3);
           iconKey: res.value.iconKey,
           diceRolls: res.value.rolls,
           diceRender3d: res.value.render3d ? true : void 0,
+          scaleLikeSticker: res.value.scaleLikeSticker ? true : void 0,
           tooltip: diceRollsToFormula(res.value.rolls)
         };
+        if (res.value.placeAsHudPin && typeof vx === "number" && typeof vy === "number") {
+          marker.anchorSpace = "viewport";
+          marker.hudX = vx;
+          marker.hudY = vy;
+          this.classifyHudMetaFromCurrentPosition(
+            marker,
+            this.viewportEl.getBoundingClientRect()
+          );
+        }
         this.data.markers.push(marker);
         void this.saveDataSoon();
         this.renderMarkersOnly();
@@ -7987,7 +8348,7 @@ Total: ${local.total}`, 6e3);
       {
         label: "Add dice pin here\u2026",
         action: () => {
-          this.addDicePinHere(nx, ny);
+          this.addDicePinHere(nx, ny, vx, vy);
           this.closeMenu();
         }
       }
@@ -8977,11 +9338,13 @@ Total: ${local.total}`, 6e3);
         this.showZoomHud();
         this.updateMarkerInvScaleOnly();
         this.updateMarkerZoomVisibilityOnly();
+        this.renderDrawingEditHandles();
         void this.maybeUpgradeSvgBaseForCurrentZoom();
       }
       this.renderMeasure();
       this.renderCalibrate();
       if (this.isCanvas()) this.renderCanvas();
+      this.renderDrawingEditHandles();
     }
   }
   panBy(dx, dy) {
@@ -10291,6 +10654,7 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
         }
       }
     }
+    this.renderDrawingEditHandles();
   }
   formatPolylineDistance(px) {
     var _a, _b, _c;
@@ -10439,6 +10803,14 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
   async deleteDrawing(d) {
     var _a;
     if (!this.data) return;
+    if (this.drawEditDrawingId === d.id) {
+      this.drawEditDrawingId = null;
+      this.drawEditMode = null;
+      this.drawEditPointIndex = null;
+      this.drawEditHandleKind = null;
+      this.drawEditPointerId = null;
+      this.drawEditOriginalDrawing = null;
+    }
     if (d.bakedPath) {
       const af = this.app.vault.getAbstractFileByPath(d.bakedPath);
       if (af instanceof import_obsidian18.TFile) {
@@ -10456,6 +10828,7 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
   }
   onDrawingContextMenu(ev, d) {
     this.closeMenu();
+    const canEditGeometry = d.kind === "polygon" || d.kind === "polyline" || d.kind === "rect" || d.kind === "circle";
     const items = [
       {
         label: "Edit drawing\u2026",
@@ -10464,6 +10837,7 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
           if (!this.data) return;
           const modal = new DrawingEditorModal(this.app, d, (res) => {
             var _a;
+            this.stopEditDrawingGeometry(true);
             if (!this.data) return;
             if (res.action === "save" && res.drawing) {
               const updated = res.drawing;
@@ -10490,6 +10864,20 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
           modal.open();
         }
       },
+      ...canEditGeometry ? [
+        {
+          label: this.drawEditDrawingId === d.id ? "Stop editing points" : d.kind === "polygon" || d.kind === "polyline" ? "Edit points\u2026" : "Edit shape\u2026",
+          action: () => {
+            this.closeMenu();
+            if (this.drawEditDrawingId === d.id) {
+              this.stopEditDrawingGeometry(true);
+            } else {
+              this.stopEditDrawingGeometry(true);
+              this.startEditDrawingGeometry(d);
+            }
+          }
+        }
+      ] : [],
       {
         label: "Delete drawing",
         action: () => {
@@ -10879,6 +11267,7 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
     this.markersEl.empty();
     this.renderMarkersOnly();
     this.renderMeasure();
+    this.renderDrawingEditHandles();
     this.renderCalibrate();
     this.renderDrawings();
     if (this.isCanvas()) this.renderCanvas();
@@ -11215,10 +11604,12 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
                   {
                     iconKey: ((_a2 = m.iconKey) != null ? _a2 : this.plugin.settings.defaultIconKey).trim(),
                     rolls: (_b2 = m.diceRolls) != null ? _b2 : [{ count: 1, sides: 20 }],
+                    scaleLikeSticker: !!m.scaleLikeSticker,
+                    placeAsHudPin: m.anchorSpace === "viewport",
                     render3d: !!m.diceRender3d
                   },
                   (res) => {
-                    var _a3;
+                    var _a3, _b3, _c2;
                     if (!this.data) return;
                     if (res.action !== "save") return;
                     m.type = "dice";
@@ -11226,7 +11617,32 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
                     m.diceRolls = res.value.rolls;
                     if (res.value.render3d) m.diceRender3d = true;
                     else delete m.diceRender3d;
-                    if (!m.tooltip || m.tooltip.trim() === diceRollsToFormula((_a3 = m.diceRolls) != null ? _a3 : [])) {
+                    if (res.value.scaleLikeSticker) m.scaleLikeSticker = true;
+                    else delete m.scaleLikeSticker;
+                    const wantHud = !!res.value.placeAsHudPin;
+                    const isHud2 = m.anchorSpace === "viewport";
+                    const vpRect2 = this.viewportEl.getBoundingClientRect();
+                    if (wantHud && !isHud2) {
+                      const pos = this.worldNormToViewportPx(m.x, m.y);
+                      m.anchorSpace = "viewport";
+                      m.hudX = pos.x;
+                      m.hudY = pos.y;
+                      this.classifyHudMetaFromCurrentPosition(m, vpRect2);
+                    } else if (!wantHud && isHud2) {
+                      const hx = typeof m.hudX === "number" ? m.hudX : ((_a3 = m.x) != null ? _a3 : 0.5) * (vpRect2.width || 1);
+                      const hy = typeof m.hudY === "number" ? m.hudY : ((_b3 = m.y) != null ? _b3 : 0.5) * (vpRect2.height || 1);
+                      const world = this.viewportPxToWorldNorm(hx, hy);
+                      m.x = world.x;
+                      m.y = world.y;
+                      delete m.anchorSpace;
+                      delete m.hudX;
+                      delete m.hudY;
+                      delete m.hudModeX;
+                      delete m.hudModeY;
+                      delete m.hudLastWidth;
+                      delete m.hudLastHeight;
+                    }
+                    if (!m.tooltip || m.tooltip.trim() === diceRollsToFormula((_c2 = m.diceRolls) != null ? _c2 : [])) {
                       m.tooltip = diceRollsToFormula(res.value.rolls);
                     }
                     void this.saveDataSoon();

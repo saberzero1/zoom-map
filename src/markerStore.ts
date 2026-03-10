@@ -106,7 +106,7 @@ export interface TextLayer {
   style: TextLayerStyle;
 }
 
-export type MarkerKind = "pin" | "sticker" | "swap" | "switch";
+export type MarkerKind = "pin" | "sticker" | "swap" | "switch" | "dice";
 
 export type PingDistanceUnit = "m" | "km" | "mi" | "ft" | "custom";
 

@@ -504,6 +504,46 @@ button.zm-btn-sm {
   display: none;
 }
 
+.zm-draw-edit {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 70;
+}
+
+.zm-draw-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: var(--interactive-accent, var(--text-accent));
+  border: 2px solid var(--background-primary);
+  box-shadow: var(--shadow-s);
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.zm-draw-handle.zm-draw-handle--active {
+  cursor: grabbing;
+  background: var(--text-error, #d23c3c);
+}
+
+.zm-draw-handle--add {
+  width: 10px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--color-green, #2ea043);
+}
+
+.zm-draw-handle--radius {
+  background: var(--text-accent, #6aa9ff);
+}
+
+.zm-draw-handle--center {
+  background: var(--interactive-accent, var(--text-accent));
+}
+
 /* Zoom HUD */
 .zm-zoom-hud {
   position: absolute;

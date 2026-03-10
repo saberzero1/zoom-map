@@ -482,6 +482,14 @@ export class MapInstance extends Component {
   private drawDefs!: SVGDefsElement;
   private drawStaticLayer!: SVGGElement;
   private drawDraftLayer!: SVGGElement;
+  private drawEditHudEl!: HTMLDivElement;
+
+  private drawEditDrawingId: string | null = null;
+  private drawEditMode: "points" | "rect" | "circle" | null = null;
+  private drawEditPointIndex: number | null = null;
+  private drawEditHandleKind: string | null = null;
+  private drawEditPointerId: number | null = null;
+  private drawEditOriginalDrawing: Drawing | null = null;
 
   private zoomHud!: HTMLDivElement;
   private zoomHudTimer: number | null = null;
@@ -967,7 +975,8 @@ export class MapInstance extends Component {
 
     this.applyTransform(z, tx, ty);
     this.initialViewApplied = true;
-    this.captureViewIfVisible();  
+    this.captureViewIfVisible();
+	this.renderDrawingEditHandles();
   }
 
   private captureViewIfVisible(): void {
@@ -1722,6 +1731,7 @@ export class MapInstance extends Component {
 
     this.hudMarkersEl = this.hudClipEl.createDiv({ cls: "zm-hud-markers" });
     this.measureHud = this.hudClipEl.createDiv({ cls: "zm-measure-hud" });
+	this.drawEditHudEl = this.hudClipEl.createDiv({ cls: "zm-draw-edit" });
     this.zoomHud = this.hudClipEl.createDiv({ cls: "zm-zoom-hud" });
 
     this.registerDomEvent(this.viewportEl, "wheel", (e: WheelEvent) => {
@@ -1746,7 +1756,7 @@ export class MapInstance extends Component {
       if (this.activePointers.has(e.pointerId)) this.activePointers.delete(e.pointerId);
       if (this.pinchActive && this.activePointers.size < 2) this.endPinch();
       e.preventDefault();
-      this.onPointerUp();
+      this.onPointerUp(e);
     });
 
     this.registerDomEvent(window, "pointercancel", (e: PointerEvent) => {
@@ -1777,6 +1787,22 @@ export class MapInstance extends Component {
     this.registerDomEvent(window, "keydown", (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
 	  
+      if (this.textMode === "move") {
+        this.finishTextLayerMove(false);
+        this.textMode = null;
+        this.activeTextLayerId = null;
+        this.renderTextDraft();
+        this.renderTextLayers();
+        this.closeMenu();
+        return;
+      }
+
+      if (this.drawEditDrawingId) {
+        this.stopEditDrawingGeometry(false);
+        this.closeMenu();
+        return;
+      }
+
       if (this.textMode === "move") {
         this.finishTextLayerMove(false);
         this.textMode = null;
@@ -2374,6 +2400,336 @@ export class MapInstance extends Component {
 
     this.drawDraftLayer = document.createElementNS(ns, "g");
     this.drawSvg.appendChild(this.drawDraftLayer);
+  }
+  
+  private getDrawingById(id: string): Drawing | null {
+    const list = this.data?.drawings ?? [];
+    for (const d of list) {
+      if (d.id === id) return d;
+    }
+    return null;
+  }
+
+  private getEditableDrawingPoints(d: Drawing): { x: number; y: number }[] | null {
+    if (d.kind === "polygon" && Array.isArray(d.polygon)) return d.polygon;
+    if (d.kind === "polyline" && Array.isArray(d.polyline)) return d.polyline;
+    return null;
+  }
+  
+  private getEditableDrawingMode(d: Drawing): "points" | "rect" | "circle" | null {
+    if (d.kind === "polygon" || d.kind === "polyline") return "points";
+    if (d.kind === "rect") return "rect";
+    if (d.kind === "circle") return "circle";
+    return null;
+  }
+
+  private startEditDrawingGeometry(d: Drawing): void {
+    const mode = this.getEditableDrawingMode(d);
+    if (!mode) {
+      new Notice("This drawing cannot be edited right now.", 2500);
+      return;
+    }
+
+    this.stopTextEdit(true);
+    this.finishTextLayerMove(false);
+	this.stopEditDrawingGeometry(true);
+    this.measuring = false;
+    this.calibrating = false;
+    this.drawingMode = null;
+    this.drawRectStart = null;
+    this.drawCircleCenter = null;
+    this.drawPolygonPoints = [];
+
+    if (this.drawDraftLayer) this.drawDraftLayer.innerHTML = "";
+
+    this.drawEditDrawingId = d.id;
+	this.drawEditMode = mode;
+    this.drawEditPointIndex = null;
+	this.drawEditHandleKind = null;
+    this.drawEditPointerId = null;
+    this.drawEditOriginalDrawing = JSON.parse(JSON.stringify(d)) as Drawing;
+
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+
+    if (mode === "points") {
+      new Notice("Edit points: drag handles, drag green midpoint handles to add points, double-click a point to delete it. Press esc to cancel.", 6000);
+    } else if (mode === "rect") {
+      new Notice("Edit rectangle: drag corner handles. Press esc to cancel.", 4000);
+    } else {
+      new Notice("Edit circle: drag center or radius handle. Press esc to cancel.", 4000);
+    }
+  }
+
+  private stopEditDrawingGeometry(commit: boolean): void {
+    if (!this.drawEditDrawingId) return;
+
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!commit && d && this.drawEditOriginalDrawing) {
+      d.rect = this.drawEditOriginalDrawing.rect
+        ? { ...this.drawEditOriginalDrawing.rect }
+        : undefined;
+      d.circle = this.drawEditOriginalDrawing.circle
+        ? { ...this.drawEditOriginalDrawing.circle }
+        : undefined;
+      d.polygon = this.drawEditOriginalDrawing.polygon
+        ? this.drawEditOriginalDrawing.polygon.map((p) => ({ x: p.x, y: p.y }))
+        : undefined;
+      d.polyline = this.drawEditOriginalDrawing.polyline
+        ? this.drawEditOriginalDrawing.polyline.map((p) => ({ x: p.x, y: p.y }))
+        : undefined;
+    }
+
+    this.drawEditDrawingId = null;
+	this.drawEditMode = null;
+    this.drawEditPointIndex = null;
+	this.drawEditHandleKind = null;
+    this.drawEditPointerId = null;
+    this.drawEditOriginalDrawing = null;
+
+    if (commit) void this.saveDataSoon();
+
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+  }
+  
+  private insertPointIntoEditedDrawing(segmentIndex: number, p: Point): number | null {
+    if (!this.drawEditDrawingId) return null;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return null;
+
+    const pts = this.getEditableDrawingPoints(d);
+    if (!pts) return null;
+
+    const insertAt = clamp(segmentIndex + 1, 0, pts.length);
+    pts.splice(insertAt, 0, {
+      x: clamp(p.x, 0, 1),
+      y: clamp(p.y, 0, 1),
+    });
+    return insertAt;
+  }
+
+  private deletePointFromEditedDrawing(pointIndex: number): void {
+    if (!this.drawEditDrawingId) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return;
+
+    const pts = this.getEditableDrawingPoints(d);
+    if (!pts) return;
+
+    const minPoints = d.kind === "polygon" ? 3 : 2;
+    if (pts.length <= minPoints) {
+      new Notice(`This ${d.kind} needs at least ${minPoints} points.`, 2000);
+      return;
+    }
+
+    pts.splice(pointIndex, 1);
+    if (this.drawEditPointIndex === pointIndex) this.drawEditPointIndex = null;
+    else if (this.drawEditPointIndex !== null && this.drawEditPointIndex > pointIndex) this.drawEditPointIndex -= 1;
+
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+  }
+
+  private updateEditedDrawingHandleFromClient(clientX: number, clientY: number): void {
+    if (!this.drawEditDrawingId) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return;
+
+    const vpRect = this.viewportEl.getBoundingClientRect();
+    const vx = clientX - vpRect.left;
+    const vy = clientY - vpRect.top;
+    const wx = (vx - this.tx) / this.scale;
+    const wy = (vy - this.ty) / this.scale;
+
+    const nx = clamp(wx / this.imgW, 0, 1);
+    const ny = clamp(wy / this.imgH, 0, 1);
+
+    if (this.drawEditMode === "points") {
+      const pts = this.getEditableDrawingPoints(d);
+      if (!pts || this.drawEditPointIndex === null) return;
+      if (this.drawEditPointIndex < 0 || this.drawEditPointIndex >= pts.length) return;
+
+      pts[this.drawEditPointIndex].x = nx;
+      pts[this.drawEditPointIndex].y = ny;
+    } else if (this.drawEditMode === "rect" && d.rect) {
+      const key = this.drawEditHandleKind;
+      if (key === "x0y0") {
+        d.rect.x0 = nx;
+        d.rect.y0 = ny;
+      } else if (key === "x1y0") {
+        d.rect.x1 = nx;
+        d.rect.y0 = ny;
+      } else if (key === "x1y1") {
+        d.rect.x1 = nx;
+        d.rect.y1 = ny;
+      } else if (key === "x0y1") {
+        d.rect.x0 = nx;
+        d.rect.y1 = ny;
+      }
+    } else if (this.drawEditMode === "circle" && d.circle) {
+      const key = this.drawEditHandleKind;
+      if (key === "center") {
+        d.circle.cx = nx;
+        d.circle.cy = ny;
+      } else if (key === "radius") {
+        const cxPx = d.circle.cx * this.imgW;
+        const cyPx = d.circle.cy * this.imgH;
+        const px = nx * this.imgW;
+        const py = ny * this.imgH;
+        const rPx = Math.hypot(px - cxPx, py - cyPx);
+        d.circle.r = Math.max(1 / Math.max(this.imgW, this.imgH), rPx / Math.max(this.imgW, this.imgH));
+      }
+    }
+
+    this.renderDrawings();
+    this.renderDrawingEditHandles();
+  }
+  
+  private isEditedDrawingCurrentlyVisible(d: Drawing): boolean {
+    if (!d.visible) return false;
+    const layer = (this.data?.drawLayers ?? []).find((l) => l.id === d.layerId);
+    if (!layer || !layer.visible) return false;
+    const activeBase = this.getActiveBasePath();
+    if (layer.boundBase && layer.boundBase !== activeBase) return false;
+    return true;
+  }
+
+  private renderDrawingEditHandles(): void {
+    if (!this.drawEditHudEl) return;
+    this.drawEditHudEl.empty();
+
+    if (!this.drawEditDrawingId || !this.data || !this.drawEditMode) return;
+    const d = this.getDrawingById(this.drawEditDrawingId);
+    if (!d) return;
+	if (!this.isEditedDrawingCurrentlyVisible(d)) return;
+
+    const startDrag = (pointIndex: number | null, handleKind: string | null, pointerId: number) => {
+      this.drawEditPointIndex = pointIndex;
+      this.drawEditHandleKind = handleKind;
+      this.drawEditPointerId = pointerId;
+      this.plugin.setActiveMap(this);
+      this.renderDrawingEditHandles();
+    };
+
+    if (this.drawEditMode === "points") {
+      const pts = this.getEditableDrawingPoints(d);
+      if (!pts || pts.length === 0) return;
+
+      for (let i = 0; i < pts.length; i += 1) {
+        const p = pts[i];
+        const sx = this.tx + p.x * this.imgW * this.scale;
+        const sy = this.ty + p.y * this.imgH * this.scale;
+
+        const h = this.drawEditHudEl.createDiv({ cls: "zm-draw-handle" });
+        if (this.drawEditPointIndex === i) h.classList.add("zm-draw-handle--active");
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = "Drag to move. Double click to delete.";
+
+        h.addEventListener("pointerdown", (e: PointerEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startDrag(i, "point", e.pointerId);
+        });
+
+        h.addEventListener("dblclick", (e: MouseEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.deletePointFromEditedDrawing(i);
+        });
+      }
+
+      const segCount = d.kind === "polygon" ? pts.length : Math.max(0, pts.length - 1);
+      for (let i = 0; i < segCount; i += 1) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        if (!a || !b) continue;
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const sx = this.tx + mx * this.imgW * this.scale;
+        const sy = this.ty + my * this.imgH * this.scale;
+
+        const h = this.drawEditHudEl.createDiv({ cls: "zm-draw-handle zm-draw-handle--add" });
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = "Drag to insert a new point.";
+
+        h.addEventListener("pointerdown", (e: PointerEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const inserted = this.insertPointIntoEditedDrawing(i, { x: mx, y: my });
+          if (inserted === null) return;
+          startDrag(inserted, "point", e.pointerId);
+          this.renderDrawings();
+          this.renderDrawingEditHandles();
+        });
+      }
+      return;
+    }
+
+    if (this.drawEditMode === "rect" && d.rect) {
+      const corners = [
+        { key: "x0y0", x: d.rect.x0, y: d.rect.y0 },
+        { key: "x1y0", x: d.rect.x1, y: d.rect.y0 },
+        { key: "x1y1", x: d.rect.x1, y: d.rect.y1 },
+        { key: "x0y1", x: d.rect.x0, y: d.rect.y1 },
+      ];
+
+      for (const c of corners) {
+        const sx = this.tx + c.x * this.imgW * this.scale;
+        const sy = this.ty + c.y * this.imgH * this.scale;
+        const h = this.drawEditHudEl.createDiv({ cls: "zm-draw-handle" });
+        if (this.drawEditHandleKind === c.key) h.classList.add("zm-draw-handle--active");
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = "Drag to resize rectangle.";
+        h.addEventListener("pointerdown", (e: PointerEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startDrag(null, c.key, e.pointerId);
+        });
+      }
+      return;
+    }
+
+    if (this.drawEditMode === "circle" && d.circle) {
+      const cxPx = d.circle.cx * this.imgW;
+      const cyPx = d.circle.cy * this.imgH;
+      const rPx = d.circle.r * Math.max(this.imgW, this.imgH);
+
+      const handles = [
+        {
+          key: "center",
+          cls: "zm-draw-handle zm-draw-handle--center",
+          xPx: cxPx,
+          yPx: cyPx,
+          title: "Drag to move circle center.",
+        },
+        {
+          key: "radius",
+          cls: "zm-draw-handle zm-draw-handle--radius",
+          xPx: cxPx + rPx,
+          yPx: cyPx,
+          title: "Drag to change circle radius.",
+        },
+      ];
+
+      for (const c of handles) {
+        const sx = this.tx + c.xPx * this.scale;
+        const sy = this.ty + c.yPx * this.scale;
+        const h = this.drawEditHudEl.createDiv({ cls: c.cls });
+        if (this.drawEditHandleKind === c.key) h.classList.add("zm-draw-handle--active");
+        h.style.left = `${sx}px`;
+        h.style.top = `${sy}px`;
+        h.title = c.title;
+        h.addEventListener("pointerdown", (e: PointerEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startDrag(null, c.key, e.pointerId);
+        });
+      }
+    }
   }
   
   private ensureTextData(): void {
@@ -4070,6 +4426,7 @@ export class MapInstance extends Component {
       this.fitToView();
       if (this.isCanvas()) this.renderCanvas();
       this.renderMarkersOnly();
+	  this.renderDrawingEditHandles();
       return;
     }
 	
@@ -4091,6 +4448,7 @@ export class MapInstance extends Component {
 
       if (this.isCanvas()) this.renderCanvas();
       this.renderMarkersOnly();
+	  this.renderDrawingEditHandles();
       return;
     }
 
@@ -4103,6 +4461,7 @@ export class MapInstance extends Component {
     const tyNew = this.vh / 2 - worldCy * this.scale;
     this.applyTransform(this.scale, txNew, tyNew, true);
     this.renderMarkersOnly();
+	this.renderDrawingEditHandles();
 
     if (
       this.shouldUseSavedFrame() &&
@@ -4185,6 +4544,7 @@ export class MapInstance extends Component {
     if (this.textMoveDragging) {
       e.preventDefault();
       e.stopPropagation();
+
       const vpRect = this.viewportEl.getBoundingClientRect();
       const vx = e.clientX - vpRect.left;
       const vy = e.clientY - vpRect.top;
@@ -4194,6 +4554,18 @@ export class MapInstance extends Component {
       this.updateTextLayerMove(p);
       return;
     }
+	
+    if (this.drawEditPointerId !== null && e.pointerId === this.drawEditPointerId) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.updateEditedDrawingHandleFromClient(e.clientX, e.clientY);
+      return;
+    }
+
+    if (this.drawEditDrawingId) {
+      this.renderDrawingEditHandles();
+    }
+
 
     // Prevent workspace edge-swipe gestures while actively panning/zooming on touch devices.
     if (e.pointerType === "touch") {
@@ -4334,7 +4706,18 @@ export class MapInstance extends Component {
     this.requestPanFrame();
   }
 
-  private onPointerUp(): void {
+  private onPointerUp(e?: PointerEvent): void {
+  if (
+      this.drawEditPointerId !== null &&
+      (!e || e.pointerId === this.drawEditPointerId)
+    ) {
+      this.drawEditPointerId = null;
+      this.drawEditPointIndex = null;
+      void this.saveDataSoon();
+      this.renderDrawings();
+      this.renderDrawingEditHandles();
+      return;
+    }
 	  
   if (this.textMoveDragging) {
       this.finishTextLayerMove(true);
@@ -4787,6 +5170,20 @@ this.viewDragDist = 0;
     return preset.frames[idx];
   }
   
+  private worldNormToViewportPx(nx: number, ny: number): { x: number; y: number } {
+    return {
+      x: this.tx + nx * this.imgW * this.scale,
+      y: this.ty + ny * this.imgH * this.scale,
+    };
+  }
+
+  private viewportPxToWorldNorm(hx: number, hy: number): { x: number; y: number } {
+    return {
+      x: clamp(((hx - this.tx) / this.scale) / this.imgW, 0, 1),
+      y: clamp(((hy - this.ty) / this.scale) / this.imgH, 0, 1),
+    };
+  }
+  
   private getPingPresetsSplitForActive(): { pingBase: PingPreset[]; pingGlobal: PingPreset[] } {
     const { pingBase, pingGlobal } = this.computeCollectionSets();
     return { pingBase, pingGlobal };
@@ -4919,7 +5316,7 @@ this.viewDragDist = 0;
     new Notice(`Roll: ${formula}\n${local.details}\nTotal: ${local.total}`, 6000);
   }
 
-  private addDicePinHere(nx: number, ny: number): void {
+  private addDicePinHere(nx: number, ny: number, vx?: number, vy?: number): void {
     if (!this.data) return;
 
     const iconKey = this.plugin.settings.defaultIconKey;
@@ -4928,7 +5325,13 @@ this.viewDragDist = 0;
     new DicePinModal(
       this.app,
       this.plugin,
-      { iconKey, rolls: [{ count: 1, sides: 20 }], render3d: false },
+      {
+        iconKey,
+        rolls: [{ count: 1, sides: 20 }],
+        render3d: false,
+        scaleLikeSticker: !!this.plugin.settings.defaultScaleLikeSticker,
+        placeAsHudPin: false,
+      },
       (res) => {
         if (!this.data) return;
         if (res.action !== "save") return;
@@ -4942,8 +5345,19 @@ this.viewDragDist = 0;
           iconKey: res.value.iconKey,
           diceRolls: res.value.rolls,
           diceRender3d: res.value.render3d ? true : undefined,
+		  scaleLikeSticker: res.value.scaleLikeSticker ? true : undefined,
           tooltip: diceRollsToFormula(res.value.rolls),
         };
+		
+        if (res.value.placeAsHudPin && typeof vx === "number" && typeof vy === "number") {
+          marker.anchorSpace = "viewport";
+          marker.hudX = vx;
+          marker.hudY = vy;
+          this.classifyHudMetaFromCurrentPosition(
+            marker,
+            this.viewportEl.getBoundingClientRect(),
+          );
+        }
 
         this.data.markers.push(marker);
         void this.saveDataSoon();
@@ -5343,7 +5757,7 @@ private onContextMenuViewport(e: MouseEvent): void {
       {
         label: "Add dice pin here…",
         action: () => {
-          this.addDicePinHere(nx, ny);
+          this.addDicePinHere(nx, ny, vx, vy);
           this.closeMenu();
         },
       },
@@ -6457,6 +6871,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         this.showZoomHud();
         this.updateMarkerInvScaleOnly();
         this.updateMarkerZoomVisibilityOnly();
+		this.renderDrawingEditHandles();
         // If SVG base: kick off async raster upgrade after zoom changes.
         // Keep current bitmap visible; swap when ready.
         void this.maybeUpgradeSvgBaseForCurrentZoom();
@@ -6464,6 +6879,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       this.renderMeasure();
       this.renderCalibrate();
       if (this.isCanvas()) this.renderCanvas();
+	  this.renderDrawingEditHandles();
     }
   }
 
@@ -8106,6 +8522,8 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         }
       }
     }
+
+    this.renderDrawingEditHandles();
   }
   
   private formatPolylineDistance(px: number): string | null {
@@ -8309,6 +8727,15 @@ if (this.plugin.settings.enableTextLayers && this.data) {
   private async deleteDrawing(d: Drawing): Promise<void> {
   if (!this.data) return;
 
+  if (this.drawEditDrawingId === d.id) {
+    this.drawEditDrawingId = null;
+    this.drawEditMode = null;
+    this.drawEditPointIndex = null;
+    this.drawEditHandleKind = null;
+    this.drawEditPointerId = null;
+    this.drawEditOriginalDrawing = null;
+  }
+
   // Remove baked SVG file if it exists
   if (d.bakedPath) {
     const af = this.app.vault.getAbstractFileByPath(d.bakedPath);
@@ -8329,6 +8756,10 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
   private onDrawingContextMenu(ev: MouseEvent, d: Drawing): void {
     this.closeMenu();
+	
+    const canEditGeometry =
+      d.kind === "polygon" || d.kind === "polyline" ||
+      d.kind === "rect" || d.kind === "circle";
 
     const items: ZMMenuItem[] = [
     {
@@ -8337,6 +8768,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         this.closeMenu();
         if (!this.data) return;
         const modal = new DrawingEditorModal(this.app, d, (res) => {
+          this.stopEditDrawingGeometry(true);
           if (!this.data) return;
           if (res.action === "save" && res.drawing) {
             const updated = res.drawing;
@@ -8364,6 +8796,27 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         modal.open();
       },
     },
+    ...(canEditGeometry
+      ? [
+          {
+            label:
+              this.drawEditDrawingId === d.id
+                ? "Stop editing points"
+                : (d.kind === "polygon" || d.kind === "polyline")
+                  ? "Edit points…"
+                  : "Edit shape…",
+            action: () => {
+              this.closeMenu();
+              if (this.drawEditDrawingId === d.id) {
+                this.stopEditDrawingGeometry(true);
+              } else {
+                this.stopEditDrawingGeometry(true);
+                this.startEditDrawingGeometry(d);
+              }
+            },
+          } as ZMMenuItem,
+        ]
+      : []),
     {
       label: "Delete drawing",
       action: () => {
@@ -8822,6 +9275,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
     this.markersEl.empty();
     this.renderMarkersOnly();
     this.renderMeasure();
+	this.renderDrawingEditHandles();
     this.renderCalibrate();
     this.renderDrawings();
 
@@ -9231,6 +9685,8 @@ if (this.plugin.settings.enableTextLayers && this.data) {
                   {
                     iconKey: (m.iconKey ?? this.plugin.settings.defaultIconKey).trim(),
                     rolls: m.diceRolls ?? [{ count: 1, sides: 20 }],
+                    scaleLikeSticker: !!m.scaleLikeSticker,
+                    placeAsHudPin: m.anchorSpace === "viewport",
                     render3d: !!m.diceRender3d,
                   },
                   (res) => {
@@ -9242,6 +9698,41 @@ if (this.plugin.settings.enableTextLayers && this.data) {
                     m.diceRolls = res.value.rolls;
                     if (res.value.render3d) m.diceRender3d = true;
                     else delete m.diceRender3d;
+
+                    if (res.value.scaleLikeSticker) m.scaleLikeSticker = true;
+                    else delete m.scaleLikeSticker;
+
+                    const wantHud = !!res.value.placeAsHudPin;
+                    const isHud = m.anchorSpace === "viewport";
+                    const vpRect = this.viewportEl.getBoundingClientRect();
+
+                    if (wantHud && !isHud) {
+                      const pos = this.worldNormToViewportPx(m.x, m.y);
+                      m.anchorSpace = "viewport";
+                      m.hudX = pos.x;
+                      m.hudY = pos.y;
+                      this.classifyHudMetaFromCurrentPosition(m, vpRect);
+                    } else if (!wantHud && isHud) {
+                      const hx =
+                        typeof m.hudX === "number"
+                          ? m.hudX
+                          : (m.x ?? 0.5) * (vpRect.width || 1);
+                      const hy =
+                        typeof m.hudY === "number"
+                          ? m.hudY
+                          : (m.y ?? 0.5) * (vpRect.height || 1);
+                      const world = this.viewportPxToWorldNorm(hx, hy);
+                      m.x = world.x;
+                      m.y = world.y;
+                      delete m.anchorSpace;
+                      delete m.hudX;
+                      delete m.hudY;
+                      delete m.hudModeX;
+                      delete m.hudModeY;
+                      delete m.hudLastWidth;
+                      delete m.hudLastHeight;
+                    }
+
                     if (!m.tooltip || m.tooltip.trim() === diceRollsToFormula(m.diceRolls ?? [])) {
                       m.tooltip = diceRollsToFormula(res.value.rolls);
                     }

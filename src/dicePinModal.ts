@@ -7,6 +7,8 @@ export type DicePinModalValue = {
   iconKey: string;
   rolls: DiceRollSpec[];
   render3d: boolean;
+  scaleLikeSticker: boolean;
+  placeAsHudPin: boolean;
 };
 
 export type DicePinModalResult =
@@ -59,6 +61,8 @@ export class DicePinModal extends Modal {
       iconKey: defaultIconKey,
       rolls: rolls.length ? rolls : [{ count: 1, sides: 20 }],
       render3d: !!initial.render3d,
+      scaleLikeSticker: !!initial.scaleLikeSticker,
+      placeAsHudPin: !!initial.placeAsHudPin,
     };
   }
 
@@ -86,6 +90,22 @@ export class DicePinModal extends Modal {
       .addToggle((tg) => {
         tg.setValue(this.value.render3d);
         tg.onChange((on) => (this.value.render3d = on));
+      });
+	  
+    new Setting(contentEl)
+      .setName("Scale like sticker")
+      .setDesc("Pin scales with the map (no inverse wrapper).")
+      .addToggle((tg) => {
+        tg.setValue(this.value.scaleLikeSticker);
+        tg.onChange((on) => (this.value.scaleLikeSticker = on));
+      });
+
+    new Setting(contentEl)
+      .setName("Place as hud pin")
+      .setDesc("Places the pin in viewport space (stays fixed in the window).")
+      .addToggle((tg) => {
+        tg.setValue(this.value.placeAsHudPin);
+        tg.onChange((on) => (this.value.placeAsHudPin = on));
       });
 
     const formulaRow = new Setting(contentEl).setName("Formula");
@@ -175,6 +195,8 @@ export class DicePinModal extends Modal {
           iconKey: (this.value.iconKey ?? "").trim(),
           rolls: cleaned,
           render3d: !!this.value.render3d,
+          scaleLikeSticker: !!this.value.scaleLikeSticker,
+          placeAsHudPin: !!this.value.placeAsHudPin,
         },
       });
     };
