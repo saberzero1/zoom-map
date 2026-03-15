@@ -4974,6 +4974,7 @@ var MapInstance = class extends import_obsidian18.Component {
     var _a, _b, _c, _d, _e, _f, _g;
     this.el.classList.add("zm-root");
     this.el.classList.toggle("zm-root--framepad", this.hasViewportFrame());
+    this.applyGlobalHoverPopoverStyleVars();
     if (this.isCanvas()) this.el.classList.add("zm-root--canvas-mode");
     if (this.cfg.responsive) this.el.classList.add("zm-root--responsive");
     if (this.cfg.responsive) {
@@ -5604,6 +5605,23 @@ var MapInstance = class extends import_obsidian18.Component {
     }
     return null;
   }
+  applyGlobalHoverPopoverStyleVars() {
+    var _a, _b;
+    const doc = this.el.ownerDocument;
+    const root = doc == null ? void 0 : doc.documentElement;
+    const body = doc == null ? void 0 : doc.body;
+    if (!root || !body) return;
+    const maxW = Math.max(200, (_a = this.plugin.settings.hoverMaxWidth) != null ? _a : 360);
+    const maxH = Math.max(120, (_b = this.plugin.settings.hoverMaxHeight) != null ? _b : 260);
+    root.style.setProperty("--zm-hover-popover-max-width", `${maxW}px`);
+    root.style.setProperty("--zm-hover-popover-max-height", `${maxH}px`);
+    root.style.setProperty("--popover-width", `${maxW}px`);
+    root.style.setProperty("--popover-height", `${maxH}px`);
+    root.style.setProperty("--popover-max-height", `${maxH}px`);
+    body.style.setProperty("--popover-width", `${maxW}px`);
+    body.style.setProperty("--popover-height", `${maxH}px`);
+    body.style.setProperty("--popover-max-height", `${maxH}px`);
+  }
   getEditableDrawingPoints(d) {
     if (d.kind === "polygon" && Array.isArray(d.polygon)) return d.polygon;
     if (d.kind === "polyline" && Array.isArray(d.polyline)) return d.polyline;
@@ -5655,6 +5673,11 @@ var MapInstance = class extends import_obsidian18.Component {
       d.circle = this.drawEditOriginalDrawing.circle ? { ...this.drawEditOriginalDrawing.circle } : void 0;
       d.polygon = this.drawEditOriginalDrawing.polygon ? this.drawEditOriginalDrawing.polygon.map((p) => ({ x: p.x, y: p.y })) : void 0;
       d.polyline = this.drawEditOriginalDrawing.polyline ? this.drawEditOriginalDrawing.polyline.map((p) => ({ x: p.x, y: p.y })) : void 0;
+    }
+    if (commit && d) {
+      delete d.bakedPath;
+      delete d.bakedWidth;
+      delete d.bakedHeight;
     }
     this.drawEditDrawingId = null;
     this.drawEditMode = null;
@@ -11882,6 +11905,7 @@ ${(0, import_obsidian18.stringifyYaml)(fm).trimEnd()}
     if (link) {
       const workspace = this.app.workspace;
       const forcePopover = this.plugin.settings.forcePopoverWithoutModKey === true || hoverOverride === true;
+      this.applyGlobalHoverPopoverStyleVars();
       const eventForPopover = forcePopover ? new MouseEvent("mousemove", {
         clientX: ev.clientX,
         clientY: ev.clientY,

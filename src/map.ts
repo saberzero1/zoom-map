@@ -1649,7 +1649,8 @@ export class MapInstance extends Component {
 
   private async bootstrap(): Promise<void> {
     this.el.classList.add("zm-root");
-    this.el.classList.toggle("zm-root--framepad", this.hasViewportFrame());	
+    this.el.classList.toggle("zm-root--framepad", this.hasViewportFrame());
+	this.applyGlobalHoverPopoverStyleVars();
     if (this.isCanvas()) this.el.classList.add("zm-root--canvas-mode");
     if (this.cfg.responsive) this.el.classList.add("zm-root--responsive");
 
@@ -2409,6 +2410,25 @@ export class MapInstance extends Component {
     }
     return null;
   }
+  
+  private applyGlobalHoverPopoverStyleVars(): void {
+    const doc = this.el.ownerDocument;
+    const root = doc?.documentElement;
+    const body = doc?.body;
+    if (!root || !body) return;
+
+    const maxW = Math.max(200, this.plugin.settings.hoverMaxWidth ?? 360);
+    const maxH = Math.max(120, this.plugin.settings.hoverMaxHeight ?? 260);
+
+    root.style.setProperty("--zm-hover-popover-max-width", `${maxW}px`);
+    root.style.setProperty("--zm-hover-popover-max-height", `${maxH}px`);
+    root.style.setProperty("--popover-width", `${maxW}px`);
+    root.style.setProperty("--popover-height", `${maxH}px`);
+    root.style.setProperty("--popover-max-height", `${maxH}px`);
+    body.style.setProperty("--popover-width", `${maxW}px`);
+    body.style.setProperty("--popover-height", `${maxH}px`);
+    body.style.setProperty("--popover-max-height", `${maxH}px`);
+  }
 
   private getEditableDrawingPoints(d: Drawing): { x: number; y: number }[] | null {
     if (d.kind === "polygon" && Array.isArray(d.polygon)) return d.polygon;
@@ -2478,6 +2498,12 @@ export class MapInstance extends Component {
       d.polyline = this.drawEditOriginalDrawing.polyline
         ? this.drawEditOriginalDrawing.polyline.map((p) => ({ x: p.x, y: p.y }))
         : undefined;
+    }
+	
+    if (commit && d) {
+      delete d.bakedPath;
+      delete d.bakedWidth;
+      delete d.bakedHeight;
     }
 
     this.drawEditDrawingId = null;
@@ -10009,6 +10035,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       const forcePopover =
         this.plugin.settings.forcePopoverWithoutModKey === true || hoverOverride === true;
 
+      this.applyGlobalHoverPopoverStyleVars();
       const eventForPopover = forcePopover
         ? new MouseEvent("mousemove", {
             clientX: ev.clientX,

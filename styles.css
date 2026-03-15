@@ -422,6 +422,57 @@ button.zm-btn-sm {
   display: none !important;
 }
 
+:root {
+  --zm-hover-popover-max-width: 360px;
+  --zm-hover-popover-max-height: 260px;
+  --popover-width: 360px;
+  --popover-height: 260px;
+  --popover-max-height: 260px;
+}
+body {
+  --popover-width: var(--zm-hover-popover-max-width, 360px);
+  --popover-height: var(--zm-hover-popover-max-height, 260px);
+  --popover-max-height: var(--zm-hover-popover-max-height, 260px);
+}
+
+.popover.hover-popover,
+.hover-popover {
+  --popover-width: min(var(--zm-hover-popover-max-width, 360px), 92vw);
+  width: var(--popover-width) !important;
+  max-width: var(--popover-width) !important;
+  --popover-height: min(var(--zm-hover-popover-max-height, 260px), 92vh);
+  --popover-max-height: min(var(--zm-hover-popover-max-height, 260px), 92vh);
+  height: var(--popover-height) !important;
+  max-height: var(--popover-max-height) !important;
+  height: auto !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.popover.hover-popover .hover-popover-content,
+.hover-popover .hover-popover-content,
+.popover.hover-popover .popover-content,
+.hover-popover .popover-content {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  min-height: 0 !important;
+  overflow: auto !important;
+  flex: 1 1 auto !important;
+}
+
+.popover.hover-popover .markdown-preview-view,
+.hover-popover .markdown-preview-view,
+.popover.hover-popover .markdown-preview-section,
+.hover-popover .markdown-preview-section {
+  max-width: 100% !important;
+  max-height: 100% !important;
+  min-height: 0 !important;
+}
+
 /* Tooltip */
 .zm-tooltip {
   position: absolute;
