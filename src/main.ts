@@ -150,6 +150,7 @@ const DEFAULT_SETTINGS: ZoomMapSettingsExtended = {
   preferCanvasImagesWhenCaching: false, 
   svgRasterMaxScale: 8,
   showImageIconPreviewInSettings: false,
+  enableGrid: false,
   middleClickOpensLinkInNewTab: false,
   enableSecondScreen: false,
   secondScreenFolder: "ZoomMap/SecondScreen",
@@ -845,6 +846,7 @@ export default class ZoomMapPlugin extends Plugin {
 	this.settings.enableTextLayers ??= false;
 	this.settings.enableMeasurePro ??= false;
 	this.settings.showLinkFileNameInTooltip ??= false;
+	this.settings.enableGrid ??= false;
 	this.settings.applyHoverPopoverSizeGlobally ??= false;
 	
     this.settings.enableSessionImageCache ??= false;

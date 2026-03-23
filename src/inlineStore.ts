@@ -103,10 +103,12 @@ export class NoteMarkerStore {
       },
       frame: undefined,
       pinSizeOverrides: {},
+	  grids: [],
       panClamp: true,
       drawLayers: [],
       drawings: [],
 	  textLayers: [],
+	  secondScreen: { showGrids: true },
     };
 
     const payload = JSON.stringify(sanitizeMarkerFileDataForSave(data), null, 2);

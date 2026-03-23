@@ -13,6 +13,7 @@ import type {
   DrawingKind,
   FillPatternKind,
   TextLayer,
+  GridOverlay,
   TextBaseline,
   TextBox,
   TextBoxAutoConfig,
@@ -33,6 +34,7 @@ import { SwapFramesEditorModal } from "./collectionsModals";
 import { SvgRasterExportModal } from "./svgRasterExportModal";
 import { SwapLinksEditorModal, type SwapLinksEditorResult } from "./swapLinksEditorModal";
 import { MeasureTerrainModal, type MeasureTerrainSegment } from "./measureTerrainModal";
+import { GridEditorModal } from "./gridEditorModal";
 import { SwitchPinModal, type SwitchPinModalResult } from "./switchPinModal";
 import { TextBoxConfigModal } from "./textBoxConfigModal";
 import { SecondScreenLayersModal } from "./secondScreenLayersModal";
@@ -264,6 +266,7 @@ export interface ZoomMapSettings {
   showImageIconPreviewInSettings?: boolean;
   middleClickOpensLinkInNewTab?: boolean;
   enableSecondScreen?: boolean;
+  enableGrid?: boolean;
   secondScreenFolder?: string;
 }
 
@@ -476,6 +479,10 @@ export class MapInstance extends Component {
   private imgEl!: HTMLImageElement;
   private overlaysEl!: HTMLDivElement;
   private markersEl!: HTMLDivElement;
+  private gridEl!: HTMLDivElement;
+  private gridSvg!: SVGSVGElement;
+  private gridStaticLayer!: SVGGElement;
+
   private hudMarkersEl!: HTMLDivElement;
 
   private measureEl!: HTMLDivElement;
@@ -502,6 +509,10 @@ export class MapInstance extends Component {
   private drawEditOriginalDrawing: Drawing | null = null;
 
   private zoomHud!: HTMLDivElement;
+  private gridAlignId: string | null = null;
+  private gridAlignPreview: { x: number; y: number } | null = null;
+  private gridAlignOriginalSpacing: number | null = null;
+
   private zoomHudTimer: number | null = null;
 
   private initialLayoutDone = false;
@@ -1393,11 +1404,13 @@ export class MapInstance extends Component {
           name: l.name ?? "Text layer",
           selected: textSelected.has(l.id),
         })),
+        showGrids: sec.showGrids !== false,
       },
       (res) => {
         if (res.action !== "save" || !this.data) return;
         const cfg = this.ensureSecondScreenConfig();
         cfg.markerLayerIds = res.markerLayerIds;
+		cfg.showGrids = res.showGrids;
         cfg.drawLayerIds = res.drawLayerIds;
         cfg.textLayerIds = res.textLayerIds;
         void this.saveDataSoon();
@@ -1413,6 +1426,7 @@ export class MapInstance extends Component {
       JSON.stringify(sanitizeMarkerFileDataForSave(this.data)),
     ) as MarkerFileData;
 
+    const sec = this.ensureSecondScreenConfig();
     const { markerLayerIds, drawLayerIds, textLayerIds } = this.getSecondScreenSelectedIds();
 
     snapshot.layers = (snapshot.layers ?? []).map((l) => ({
@@ -1428,6 +1442,11 @@ export class MapInstance extends Component {
       locked: false,
     }));
     snapshot.drawings = (snapshot.drawings ?? []).filter((d) => drawLayerIds.has(d.layerId));
+	
+    const showGrids = sec.showGrids !== false;
+    snapshot.grids = showGrids
+      ? (snapshot.grids ?? []).filter((g) => g.visible !== false && g.playerScreen !== "gm-only")
+      : [];
 
     snapshot.textLayers = (snapshot.textLayers ?? []).filter((t) => textLayerIds.has(t.id));
 
@@ -1995,6 +2014,7 @@ export class MapInstance extends Component {
 
     this.imgEl = this.worldEl.createEl("img", { cls: "zm-image" });
     this.overlaysEl = this.worldEl.createDiv({ cls: "zm-overlays" });
+	this.setupGridOverlay();
     this.markersEl = this.worldEl.createDiv({ cls: "zm-markers" });
 
     // Viewport frame (outer box)
@@ -2096,6 +2116,22 @@ export class MapInstance extends Component {
     });
 
     this.registerDomEvent(window, "keydown", (e: KeyboardEvent) => {
+      if (this.gridAlignId) {
+        if (this.isGridAlignIncreaseKey(e)) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.adjustGridAlignSpacing(1);
+          return;
+        }
+
+        if (this.isGridAlignDecreaseKey(e)) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.adjustGridAlignSpacing(-1);
+          return;
+        }
+      }
+
       if (e.key !== "Escape") return;
 	  
       if (this.textMode === "move") {
@@ -2142,6 +2178,13 @@ export class MapInstance extends Component {
         this.drawPolygonPoints = [];
         if (this.drawDraftLayer) this.drawDraftLayer.innerHTML = "";
         this.closeMenu();
+        return;
+      }
+	  
+      if (this.gridAlignId) {
+        this.stopGridAlignMode(false);
+        this.closeMenu();
+        new Notice("Grid alignment cancelled.", 1200);
         return;
       }
 
@@ -2684,6 +2727,55 @@ export class MapInstance extends Component {
     this.updateMeasureHud();
   }
   
+  private setupGridOverlay(): void {
+    const ns = "http://www.w3.org/2000/svg";
+    this.gridEl = this.worldEl.createDiv({ cls: "zm-mapgrid" });
+
+    this.gridSvg = document.createElementNS(ns, "svg");
+    this.gridSvg.classList.add("zm-mapgrid__svg");
+    this.gridSvg.setAttribute("width", String(this.imgW));
+    this.gridSvg.setAttribute("height", String(this.imgH));
+    this.gridEl.appendChild(this.gridSvg);
+
+    this.gridStaticLayer = document.createElementNS(ns, "g");
+    this.gridSvg.appendChild(this.gridStaticLayer);
+  }
+  
+  private getGridById(id: string | null): GridOverlay | null {
+    return (this.data?.grids ?? []).find((g) => g.id === id) ?? null;
+  }
+  
+  private isGridAlignIncreaseKey(e: KeyboardEvent): boolean {
+    return (
+      e.key === "+" ||
+      e.code === "NumpadAdd" ||
+      (e.key === "=" && e.shiftKey)
+    );
+  }
+
+  private isGridAlignDecreaseKey(e: KeyboardEvent): boolean {
+    return (
+      e.key === "-" ||
+      e.code === "NumpadSubtract"
+    );
+  }
+
+  private adjustGridAlignSpacing(delta: number): void {
+    if (!this.gridAlignId) return;
+
+    const grid = this.getGridById(this.gridAlignId);
+    if (!grid) return;
+
+    const current =
+      Number.isFinite(grid.spacing) && grid.spacing > 1 ? grid.spacing : 64;
+    const next = Math.max(2, Math.round(current + delta));
+
+    if (next === current) return;
+
+    grid.spacing = next;
+    this.renderGrids();
+  }
+  
   private setupDrawOverlay(): void {
     const ns = "http://www.w3.org/2000/svg";
 
@@ -2703,6 +2795,218 @@ export class MapInstance extends Component {
 
     this.drawDraftLayer = document.createElementNS(ns, "g");
     this.drawSvg.appendChild(this.drawDraftLayer);
+  }
+  
+  private buildSquareGridPath(spacing: number, anchorX: number, anchorY: number): string {
+    const step = Math.max(2, spacing);
+    let d = "";
+
+    const startX = anchorX + Math.floor((0 - anchorX) / step) * step;
+    for (let x = startX; x <= this.imgW; x += step) {
+      d += `M ${x} 0 L ${x} ${this.imgH} `;
+    }
+
+    const startY = anchorY + Math.floor((0 - anchorY) / step) * step;
+    for (let y = startY; y <= this.imgH; y += step) {
+      d += `M 0 ${y} L ${this.imgW} ${y} `;
+    }
+
+    return d.trim();
+  }
+
+  private buildHexGridPath(spacing: number, anchorX: number, anchorY: number): string {
+    const hexWidth = Math.max(8, spacing);
+    const r = hexWidth / 2;
+    const hexHeight = Math.sqrt(3) * r;
+    const dx = 1.5 * r;
+    const dy = hexHeight;
+
+    const round = (n: number) => Math.round(n * 100) / 100;
+    let d = "";
+
+    const startCol = Math.floor((0 - anchorX) / dx) - 3;
+    const endCol = Math.ceil((this.imgW - anchorX) / dx) + 3;
+
+    for (let ci = startCol; ci <= endCol; ci += 1) {
+      const cx = anchorX + ci * dx;
+      const parity = ((ci % 2) + 2) % 2;
+      const baseCy = anchorY + (parity ? dy / 2 : 0);
+
+      const startRow = Math.floor((0 - baseCy) / dy) - 3;
+      const endRow = Math.ceil((this.imgH - baseCy) / dy) + 3;
+
+      for (let ri = startRow; ri <= endRow; ri += 1) {
+        const cy = baseCy + ri * dy;
+
+        if (cx + r < 0 || cx - r > this.imgW || cy + hexHeight / 2 < 0 || cy - hexHeight / 2 > this.imgH) {
+          continue;
+        }
+
+        const pts = [
+          [round(cx + r), round(cy)],
+          [round(cx + r / 2), round(cy - hexHeight / 2)],
+          [round(cx - r / 2), round(cy - hexHeight / 2)],
+          [round(cx - r), round(cy)],
+          [round(cx - r / 2), round(cy + hexHeight / 2)],
+          [round(cx + r / 2), round(cy + hexHeight / 2)],
+        ];
+
+        d +=
+          `M ${pts[0][0]} ${pts[0][1]} ` +
+          `L ${pts[1][0]} ${pts[1][1]} ` +
+          `L ${pts[2][0]} ${pts[2][1]} ` +
+          `L ${pts[3][0]} ${pts[3][1]} ` +
+          `L ${pts[4][0]} ${pts[4][1]} ` +
+          `L ${pts[5][0]} ${pts[5][1]} Z `;
+      }
+    }
+
+    return d.trim();
+  }
+
+  private renderGrids(): void {
+    if (!this.gridSvg || !this.gridStaticLayer) return;
+
+    this.gridSvg.setAttribute("width", String(this.imgW));
+    this.gridSvg.setAttribute("height", String(this.imgH));
+    this.gridStaticLayer.innerHTML = "";
+
+    if (!this.plugin.settings.enableGrid) return;
+    if (!this.data) return;
+
+    const activeBase = this.getActiveBasePath();
+    const isPlayerView = !!this.cfg.displayOnly;
+    const ns = "http://www.w3.org/2000/svg";
+
+    for (const grid of this.data.grids ?? []) {
+      const isPreview = this.gridAlignId === grid.id;
+
+      if (!isPreview && !grid.visible) continue;
+      if (!isPreview && grid.boundBase && grid.boundBase !== activeBase) continue;
+
+      if (!isPreview) {
+        const target = grid.playerScreen ?? "both";
+        if (!isPlayerView && target === "player-only") continue;
+        if (isPlayerView && target === "gm-only") continue;
+      }
+
+      const spacing = Math.max(2, Number(grid.spacing) || 64);
+      const anchorX = isPreview && this.gridAlignPreview ? this.gridAlignPreview.x : (Number.isFinite(grid.offsetX) ? grid.offsetX : 0);
+      const anchorY = isPreview && this.gridAlignPreview ? this.gridAlignPreview.y : (Number.isFinite(grid.offsetY) ? grid.offsetY : 0);
+
+      const d =
+        grid.shape === "hex"
+          ? this.buildHexGridPath(spacing, anchorX, anchorY)
+          : this.buildSquareGridPath(spacing, anchorX, anchorY);
+
+      if (!d) continue;
+
+      const path = document.createElementNS(ns, "path");
+      path.classList.add("zm-mapgrid__path");
+      path.setAttribute("d", d);
+      path.setAttribute("stroke", (grid.color ?? "#ffffff").trim() || "#ffffff");
+      path.setAttribute("stroke-width", String(Math.max(0.25, Number(grid.width) || 1)));
+      path.setAttribute("stroke-opacity", String(
+        isPreview
+          ? Math.min(1, Math.max(0.1, (grid.opacity ?? 0.5) * 0.9 + 0.1))
+          : Math.min(1, Math.max(0, Number(grid.opacity) || 0)),
+      ));
+      path.setAttribute("fill", "none");
+      path.setAttribute("pointer-events", "none");
+
+      if (isPreview) {
+        path.setAttribute("stroke-dasharray", "8 6");
+      }
+
+      this.gridStaticLayer.appendChild(path);
+    }
+  }
+
+  private addGridInteractive(): void {
+    if (!this.data) return;
+
+    const draft: GridOverlay = {
+      id: generateId("grid"),
+      name: `Grid ${(this.data.grids?.length ?? 0) + 1}`,
+      visible: true,
+      shape: "square",
+      color: "#ffffff",
+      width: 1,
+      opacity: 0.5,
+      spacing: 64,
+      offsetX: 0,
+      offsetY: 0,
+      playerScreen: "both",
+    };
+
+    new GridEditorModal(this.app, draft, (res) => {
+      if (!this.data) return;
+      if (res.action !== "save") return;
+      this.data.grids ??= [];
+      this.data.grids.push(res.grid);
+      void this.saveDataSoon();
+      this.renderGrids();
+      new Notice("Grid added.", 1200);
+    }).open();
+  }
+
+  private openGridEditor(grid: GridOverlay): void {
+    new GridEditorModal(this.app, grid, (res) => {
+      if (!this.data) return;
+      if (res.action !== "save") return;
+
+      const idx = (this.data.grids ?? []).findIndex((g) => g.id === grid.id);
+      if (idx < 0) return;
+
+      this.data.grids![idx] = res.grid;
+      void this.saveDataSoon();
+      this.renderGrids();
+    }).open();
+  }
+
+  private startGridAlignMode(gridId: string): void {
+    const grid = this.getGridById(gridId);
+    if (!grid) return;
+
+    this.stopTextEdit(true);
+    this.finishTextBoxMove(false);
+    this.stopEditDrawingGeometry(true);
+    this.measuring = false;
+    this.calibrating = false;
+    this.drawingMode = null;
+    this.textMode = null;
+
+    this.gridAlignId = gridId;
+    this.gridAlignOriginalSpacing =
+      Number.isFinite(grid.spacing) && grid.spacing > 1 ? grid.spacing : 64;
+    this.gridAlignPreview = {
+      x: Number.isFinite(grid.offsetX) ? grid.offsetX : 0,
+      y: Number.isFinite(grid.offsetY) ? grid.offsetY : 0,
+    };
+
+    this.renderGrids();
+    new Notice(
+      "Grid alignment: move the mouse and click to set the anchor. Press + / - to change spacing. Press esc to cancel.",
+      6000,
+    );
+  }
+
+  private stopGridAlignMode(commit: boolean): void {
+    if (!this.gridAlignId) return;
+
+    const grid = this.getGridById(this.gridAlignId);
+    if (commit && grid && this.gridAlignPreview) {
+      grid.offsetX = this.gridAlignPreview.x;
+      grid.offsetY = this.gridAlignPreview.y;
+      void this.saveDataSoon();
+    } else if (!commit && grid && this.gridAlignOriginalSpacing !== null) {
+      grid.spacing = this.gridAlignOriginalSpacing;
+    }
+
+    this.gridAlignId = null;
+    this.gridAlignPreview = null;
+	this.gridAlignOriginalSpacing = null;
+    this.renderGrids();
   }
   
   private getDrawingById(id: string): Drawing | null {
@@ -5017,6 +5321,12 @@ export class MapInstance extends Component {
   private onPointerDownViewport(e: PointerEvent): void {
     if (!this.ready) return;
 	
+    if (this.gridAlignId) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+	
 	if (this.textMode === "draw-box") {
       if (e.button !== 0) return;
 
@@ -5064,6 +5374,17 @@ export class MapInstance extends Component {
     if (!this.ready) return;
 	
     // Text box move drag
+    if (this.gridAlignId) {
+      const vpRect = this.viewportEl.getBoundingClientRect();
+      const vx = e.clientX - vpRect.left;
+      const vy = e.clientY - vpRect.top;
+      const wx = (vx - this.tx) / this.scale;
+      const wy = (vy - this.ty) / this.scale;
+      this.gridAlignPreview = { x: clamp(wx, 0, this.imgW), y: clamp(wy, 0, this.imgH) };
+      this.renderGrids();
+      return;
+    }
+
     if (this.textMoveDragging) {
       e.preventDefault();
       e.stopPropagation();
@@ -5466,6 +5787,10 @@ this.viewDragDist = 0;
 
   private onDblClickViewport(e: MouseEvent): void {
     if (!this.ready) return;
+	
+    if (this.gridAlignId) {
+      return;
+    }
 
     if ((this.drawingMode === "polygon" || this.drawingMode === "polyline") && this.drawPolygonPoints.length >= 2) {
       if (this.drawingMode === "polyline") this.finishPolylineDrawing();
@@ -5490,6 +5815,20 @@ this.viewDragDist = 0;
 
     private onClickViewport(e: MouseEvent): void {
     if (!this.ready) return;
+	
+    if (this.gridAlignId) {
+      const vpRect = this.viewportEl.getBoundingClientRect();
+      const vx = e.clientX - vpRect.left;
+      const vy = e.clientY - vpRect.top;
+      const wx = (vx - this.tx) / this.scale;
+      const wy = (vy - this.ty) / this.scale;
+      this.gridAlignPreview = {
+        x: clamp(wx, 0, this.imgW),
+        y: clamp(wy, 0, this.imgH),
+      };
+      this.stopGridAlignMode(true);
+      return;
+    }
 
     if (this.handleDrawClick(e)) {
       return;
@@ -6098,6 +6437,11 @@ private onContextMenuViewport(e: MouseEvent): void {
     if (!this.ready || !this.data) return;
     this.closeMenu();
     if (this.cfg.displayOnly) return;
+	
+    if (this.gridAlignId) {
+      this.stopGridAlignMode(false);
+      return;
+    }
 	
     if ((this.plugin.settings.panMouseButton ?? "left") === "right" && this.suppressContextMenuOnce) {
       this.suppressContextMenuOnce = false;
@@ -7362,6 +7706,101 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         ],
       },
     );
+	
+    if (this.plugin.settings.enableGrid) {
+      const grids = this.data.grids ?? [];
+      const gridItems: ZMMenuItem[] = [
+        {
+          label: "Add grid…",
+          action: () => {
+            this.closeMenu();
+            this.addGridInteractive();
+          },
+        },
+      ];
+
+      if (grids.length > 0) {
+        gridItems.push({ type: "separator" });
+
+        for (const g of grids) {
+          gridItems.push({
+            label: `${g.name || "Grid"}${g.boundBase ? ` → ${labelForBase(g.boundBase)}` : ""}`,
+            children: [
+              {
+                label: "Visible",
+                checked: !!g.visible,
+                action: (rowEl) => {
+                  g.visible = !g.visible;
+                  void this.saveDataSoon();
+                  this.renderGrids();
+                  const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
+                  if (chk) chk.textContent = g.visible ? "✓" : "";
+                },
+              },
+              {
+                label: "Edit grid…",
+                action: () => {
+                  this.closeMenu();
+                  this.openGridEditor(g);
+                },
+              },
+              {
+                label: "Align offset live…",
+                action: () => {
+                  this.closeMenu();
+                  this.startGridAlignMode(g.id);
+                },
+              },
+              {
+                label: "Bind to base",
+                children: [
+                  {
+                    label: "None",
+                    checked: !g.boundBase,
+                    action: (rowEl) => {
+                      g.boundBase = undefined;
+                      void this.saveDataSoon();
+                      this.renderGrids();
+                      const menu = rowEl.parentElement;
+                      menu?.querySelectorAll<HTMLElement>(".zm-menu__check").forEach((c) => (c.textContent = ""));
+                      const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
+                      if (chk) chk.textContent = "✓";
+                    },
+                  },
+                  { type: "separator" },
+                  ...bases.map<ZMMenuItem>((b) => ({
+                    label: b.name ?? basename(b.path),
+                    checked: g.boundBase === b.path,
+                    action: (rowEl) => {
+                      g.boundBase = b.path;
+                      void this.saveDataSoon();
+                      this.renderGrids();
+                      const menu = rowEl.parentElement;
+                      menu?.querySelectorAll<HTMLElement>(".zm-menu__check").forEach((c) => (c.textContent = ""));
+                      const chk = rowEl.querySelector<HTMLElement>(".zm-menu__check");
+                      if (chk) chk.textContent = "✓";
+                    },
+                  })),
+                ],
+              },
+              {
+                label: "Delete grid",
+                action: () => {
+                  if (!this.data) return;
+                  this.data.grids = (this.data.grids ?? []).filter((x) => x.id !== g.id);
+                  if (this.gridAlignId === g.id) this.stopGridAlignMode(false);
+                  void this.saveDataSoon();
+                  this.renderGrids();
+                  this.closeMenu();
+                },
+              },
+            ],
+          });
+        }
+      }
+
+      items.push({ type: "separator" }, { label: "Grid", children: gridItems });
+    }
 	
     if (this.secondScreenFeatureEnabled()) {
       items.push(
@@ -10186,6 +10625,9 @@ if (this.plugin.settings.enableTextLayers && this.data) {
 
     this.overlaysEl.style.width = `${this.imgW}px`;
     this.overlaysEl.style.height = `${this.imgH}px`;
+	
+    this.gridEl.style.width = `${this.imgW}px`;
+    this.gridEl.style.height = `${this.imgH}px`;
 
     this.markersEl.style.width = `${this.imgW}px`;
     this.markersEl.style.height = `${this.imgH}px`;
@@ -10215,6 +10657,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       this.textEditEl.style.height = `${this.imgH}px`;
     }
 
+	this.renderGrids();
     this.markersEl.empty();
     this.renderMarkersOnly();
     this.renderMeasure();
@@ -11321,6 +11764,7 @@ if (this.plugin.settings.enableTextLayers && this.data) {
       if (!this.ready) return;
       await this.applyActiveBaseAndOverlays();
       this.renderMarkersOnly();
+	  this.renderGrids();
       this.renderMeasure();
       this.renderCalibrate();
     } catch (e: unknown) {

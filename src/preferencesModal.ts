@@ -136,6 +136,16 @@ export class PreferencesModal extends Modal {
           await this.plugin.saveSettings();
         });
       });
+	  
+    new Setting(contentEl)
+      .setName("Enable grids")
+      .setDesc("Enables SVG grid overlays, grid editing and grid menu entries on maps.")
+      .addToggle((toggle) => {
+        toggle.setValue(!!this.plugin.settings.enableGrid).onChange(async (value) => {
+          this.plugin.settings.enableGrid = value;
+          await this.plugin.saveSettings();
+        });
+      });
 
     new Setting(contentEl)
       .setName("Enable measure pro (terrain segments)")

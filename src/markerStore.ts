@@ -17,6 +17,30 @@ export interface DrawLayer {
   boundBase?: string;
 }
 
+export type GridShape = "square" | "hex";
+export type GridDisplayTarget = "both" | "player-only" | "gm-only";
+
+export interface GridOverlay {
+  id: string;
+  name: string;
+  visible: boolean;
+
+  boundBase?: string;
+
+  shape: GridShape;
+
+
+  color: string;
+  width: number;
+  opacity: number; // 0..1
+
+
+  spacing: number;
+  offsetX: number;
+  offsetY: number;
+  playerScreen?: GridDisplayTarget;
+}
+
 export type DrawingKind = "polygon" | "polyline" | "rect" | "circle";
 
 export type FillPatternKind = "none" | "solid" | "striped" | "cross" | "wavy";
@@ -263,6 +287,7 @@ export interface MeasurementConfig {
 export interface SecondScreenConfig {
   markerLayerIds?: string[];
   drawLayerIds?: string[];
+  showGrids?: boolean;
   textLayerIds?: string[];
   notePath?: string;
   markersPath?: string;
@@ -287,6 +312,7 @@ export interface MarkerFileData {
   panClamp?: boolean;
 
   drawLayers?: DrawLayer[];
+  grids?: GridOverlay[];
   drawings?: Drawing[];
   
   secondScreen?: SecondScreenConfig;
@@ -368,6 +394,7 @@ export class MarkerStore {
       },
       frame: undefined,
       pinSizeOverrides: {},
+	  grids: [],
       panClamp: true,
       drawLayers: [],
       drawings: [],
@@ -457,6 +484,27 @@ export class MarkerStore {
   // Drawing layers and drawings
   parsed.drawLayers ??= [];
   parsed.drawings ??= [];
+  parsed.grids ??= [];
+  parsed.grids = parsed.grids.map((g) => ({
+    id: g.id,
+    name: g.name ?? "Grid",
+    visible: typeof g.visible === "boolean" ? g.visible : true,
+    boundBase:
+      typeof g.boundBase === "string" && g.boundBase.trim()
+        ? g.boundBase
+        : undefined,
+    shape: g.shape === "hex" ? "hex" : "square",
+    color:
+      typeof g.color === "string" && g.color.trim()
+        ? g.color
+        : "#ffffff",
+    width: Number.isFinite(g.width) && g.width > 0 ? g.width : 1,
+    opacity: Number.isFinite(g.opacity) ? Math.min(Math.max(g.opacity, 0), 1) : 0.5,
+    spacing: Number.isFinite(g.spacing) && g.spacing > 1 ? g.spacing : 64,
+    offsetX: Number.isFinite(g.offsetX) ? g.offsetX : 0,
+    offsetY: Number.isFinite(g.offsetY) ? g.offsetY : 0,
+    playerScreen: g.playerScreen === "player-only" || g.playerScreen === "gm-only" ? g.playerScreen : "both",
+  }));
   
   parsed.textLayers ??= [];
   parsed.textLayers = parsed.textLayers.map((layer) => {
@@ -496,6 +544,10 @@ export class MarkerStore {
   if (!Array.isArray(parsed.secondScreen.drawLayerIds)) delete parsed.secondScreen.drawLayerIds;
   if (!Array.isArray(parsed.secondScreen.textLayerIds)) delete parsed.secondScreen.textLayerIds;
   if (typeof parsed.secondScreen.notePath !== "string" || !parsed.secondScreen.notePath.trim()) {
+    delete parsed.secondScreen.notePath;
+  }
+  if (typeof parsed.secondScreen.showGrids !== "boolean") {
+    parsed.secondScreen.showGrids = true;
     delete parsed.secondScreen.notePath;
   }
   if (typeof parsed.secondScreen.markersPath !== "string" || !parsed.secondScreen.markersPath.trim()) {
