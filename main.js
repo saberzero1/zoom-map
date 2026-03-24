@@ -4900,6 +4900,37 @@ var MapInstance = class extends import_obsidian20.Component {
     this.captureViewIfVisible();
     this.renderDrawingEditHandles();
   }
+  applyInitialViewRect(rect) {
+    const r = this.viewportEl.getBoundingClientRect();
+    this.vw = r.width;
+    this.vh = r.height;
+    if (this.vw < 2 || this.vh < 2) return;
+    if (!this.imgW || !this.imgH) {
+      this.fitToView();
+      return;
+    }
+    const worldW = Math.abs(rect.right - rect.left) * this.imgW;
+    const worldH = Math.abs(rect.bottom - rect.top) * this.imgH;
+    if (!Number.isFinite(worldW) || !Number.isFinite(worldH) || worldW <= 0 || worldH <= 0) {
+      this.fitToView();
+      return;
+    }
+    const center = {
+      x: (rect.left + rect.right) / 2,
+      y: (rect.top + rect.bottom) / 2
+    };
+    const zoomX = this.vw / worldW;
+    const zoomY = this.vh / worldH;
+    const z = clamp(Math.max(zoomX, zoomY), this.cfg.minZoom, this.cfg.maxZoom);
+    const worldX = center.x * this.imgW;
+    const worldY = center.y * this.imgH;
+    const tx = this.vw / 2 - worldX * z;
+    const ty = this.vh / 2 - worldY * z;
+    this.applyTransform(z, tx, ty);
+    this.initialViewApplied = true;
+    this.captureViewIfVisible();
+    this.renderDrawingEditHandles();
+  }
   captureViewIfVisible() {
     if (!this.imgW || !this.imgH) return;
     const r = this.viewportEl.getBoundingClientRect();
@@ -5158,8 +5189,8 @@ var MapInstance = class extends import_obsidian20.Component {
     var _a, _b;
     const registry = (_b = (_a = this.app.plugins) == null ? void 0 : _a.plugins) != null ? _b : {};
     const raw = registry["ttrpg-tools-screen"];
-    if (!raw || typeof raw.sendNoteByPath !== "function") return null;
-    return { sendNoteByPath: raw.sendNoteByPath.bind(raw) };
+    if (!raw || typeof raw.sendNoteByPath !== "function" || typeof raw.sendMarkdownWithFog !== "function") return null;
+    return { sendNoteByPath: raw.sendNoteByPath.bind(raw), sendMarkdownWithFog: raw.sendMarkdownWithFog.bind(raw) };
   }
   secondScreenFeatureEnabled() {
     return !!this.plugin.settings.enableSecondScreen;
@@ -5272,6 +5303,19 @@ var MapInstance = class extends import_obsidian20.Component {
       centerY: clamp(worldY / this.imgH, 0, 1)
     };
   }
+  getCurrentViewRectForSecondScreen() {
+    if (!this.imgW || !this.imgH) return null;
+    const r = this.viewportEl.getBoundingClientRect();
+    const vw = r.width || this.vw || 0;
+    const vh = r.height || this.vh || 0;
+    if (vw < 2 || vh < 2) return null;
+    return {
+      left: (0 - this.tx) / this.scale / this.imgW,
+      top: (0 - this.ty) / this.scale / this.imgH,
+      right: (vw - this.tx) / this.scale / this.imgW,
+      bottom: (vh - this.ty) / this.scale / this.imgH
+    };
+  }
   getCurrentOuterAspectForSecondScreen() {
     const r = this.el.getBoundingClientRect();
     const w = r.width || 0;
@@ -5282,10 +5326,13 @@ var MapInstance = class extends import_obsidian20.Component {
   buildSecondScreenNoteContent(markersPath) {
     var _a;
     const view = this.getCurrentViewForSecondScreen();
+    const viewRect = this.getCurrentViewRectForSecondScreen();
     const aspect = this.getCurrentOuterAspectForSecondScreen();
     const padPx = 32;
-    const width = aspect && Number.isFinite(aspect) && aspect > 0 ? `min(calc(100vw - ${padPx}px), calc((100vh - ${padPx}px) * ${aspect.toFixed(6)}))` : `calc(100vw - ${padPx}px)`;
-    const height = aspect && Number.isFinite(aspect) && aspect > 0 ? `min(calc((100vw - ${padPx}px) / ${aspect.toFixed(6)}), calc(100vh - ${padPx}px))` : `calc(100vh - ${padPx}px)`;
+    const availW = `var(--ttrpg-screen-avail-w, calc(100vw - ${padPx}px))`;
+    const availH = `var(--ttrpg-screen-avail-h, calc(100vh - ${padPx}px))`;
+    const width = aspect && Number.isFinite(aspect) && aspect > 0 ? `min(${availW}, calc(${availH} * ${aspect.toFixed(6)}))` : availW;
+    const height = aspect && Number.isFinite(aspect) && aspect > 0 ? `min(calc(${availW} / ${aspect.toFixed(6)}), ${availH})` : availH;
     const yaml = {
       image: this.getActiveBasePath(),
       markers: markersPath,
@@ -5316,7 +5363,14 @@ var MapInstance = class extends import_obsidian20.Component {
       yaml.view = {
         zoom: Number(view.zoom.toFixed(4)),
         centerX: Number(view.centerX.toFixed(6)),
-        centerY: Number(view.centerY.toFixed(6))
+        centerY: Number(view.centerY.toFixed(6)),
+        ...viewRect ? {
+          left: Number(viewRect.left.toFixed(6)),
+          top: Number(viewRect.top.toFixed(6)),
+          right: Number(viewRect.right.toFixed(6)),
+          bottom: Number(viewRect.bottom.toFixed(6)),
+          fit: "cover"
+        } : {}
       };
     }
     return `\`\`\`zoommap
@@ -5324,7 +5378,7 @@ ${(0, import_obsidian20.stringifyYaml)(yaml).trimEnd()}
 \`\`\`
 `;
   }
-  async sendToSecondScreen() {
+  async sendToSecondScreen(useFog = false) {
     var _a, _b, _c, _d;
     if (!this.data) return;
     if (!this.secondScreenFeatureEnabled()) {
@@ -5361,10 +5415,15 @@ ${(0, import_obsidian20.stringifyYaml)(yaml).trimEnd()}
     } else {
       await this.app.vault.create(notePath, noteContent);
     }
+    const fogKey = `zoommap-secondscreen:${markersPath}`;
     sec.notePath = notePath;
     sec.markersPath = markersPath;
     await this.saveDataSoon();
-    await screen.sendNoteByPath(notePath);
+    if (useFog) {
+      await screen.sendMarkdownWithFog(noteContent, notePath, fogKey);
+    } else {
+      await screen.sendNoteByPath(notePath);
+    }
   }
   hasViewportFrame() {
     return typeof this.cfg.viewportFrame === "string" && this.cfg.viewportFrame.trim().length > 0;
@@ -5633,7 +5692,7 @@ ${(0, import_obsidian20.stringifyYaml)(yaml).trimEnd()}
   scheduleTryApplyInitialViewFromCallout() {
     var _a;
     if (this.cfg.responsive) return;
-    if (!this.cfg.initialZoom || !this.cfg.initialCenter) return;
+    if (!this.cfg.initialViewRect && (!this.cfg.initialZoom || !this.cfg.initialCenter)) return;
     if (this.initialViewApplied) return;
     const callouts = this.collectAncestorCallouts();
     if (callouts.length === 0) return;
@@ -5642,7 +5701,11 @@ ${(0, import_obsidian20.stringifyYaml)(yaml).trimEnd()}
       if (callouts.some((c) => c.classList.contains("is-collapsed"))) return;
       const r = this.viewportEl.getBoundingClientRect();
       if ((r.width || 0) < 2 || (r.height || 0) < 2) return;
-      this.applyInitialView(this.cfg.initialZoom, this.cfg.initialCenter);
+      if (this.cfg.initialViewRect) {
+        this.applyInitialViewRect(this.cfg.initialViewRect);
+      } else {
+        this.applyInitialView(this.cfg.initialZoom, this.cfg.initialCenter);
+      }
       if (this.isCanvas()) this.renderCanvas();
       this.renderMarkersOnly();
     };
@@ -5919,6 +5982,8 @@ ${(0, import_obsidian20.stringifyYaml)(yaml).trimEnd()}
     });
     if (this.cfg.responsive) {
       this.fitToView();
+    } else if (this.cfg.initialViewRect) {
+      this.applyInitialViewRect(this.cfg.initialViewRect);
     } else if (this.cfg.initialZoom && this.cfg.initialCenter) {
       this.applyInitialView(this.cfg.initialZoom, this.cfg.initialCenter);
     } else {
@@ -8291,7 +8356,9 @@ ${(0, import_obsidian20.stringifyYaml)(yaml).trimEnd()}
     }
     if (oldVw < 2 || oldVh < 2) {
       if (!this.initialViewApplied) {
-        if (this.cfg.initialZoom && this.cfg.initialCenter) {
+        if (this.cfg.initialViewRect) {
+          this.applyInitialViewRect(this.cfg.initialViewRect);
+        } else if (this.cfg.initialZoom && this.cfg.initialCenter) {
           this.applyInitialView(this.cfg.initialZoom, this.cfg.initialCenter);
         } else {
           this.fitToView();
@@ -10508,10 +10575,22 @@ Total: ${local.total}`, 6e3);
         { type: "separator" },
         {
           label: "Display on screen",
-          action: () => {
-            this.closeMenu();
-            void this.sendToSecondScreen();
-          }
+          children: [
+            {
+              label: "Normal",
+              action: () => {
+                this.closeMenu();
+                void this.sendToSecondScreen(false);
+              }
+            },
+            {
+              label: "Fog of war",
+              action: () => {
+                this.closeMenu();
+                void this.sendToSecondScreen(true);
+              }
+            }
+          ]
         }
       );
     }
@@ -16476,6 +16555,7 @@ var ZoomMapPlugin = class extends import_obsidian26.Plugin {
         const yamlFrameInsets = parseFrameInsetsYaml(opts.viewportFrameInsets);
         let initialZoom;
         let initialCenter;
+        let initialViewRect;
         const viewOpt = opts.view;
         if (viewOpt && typeof viewOpt === "object") {
           const rawZoom = parseZoomYaml(viewOpt.zoom, NaN);
@@ -16491,6 +16571,13 @@ var ZoomMapPlugin = class extends import_obsidian26.Plugin {
               x: Math.min(Math.max(cx, 0), 1),
               y: Math.min(Math.max(cy, 0), 1)
             };
+          }
+          const left = typeof viewOpt.left === "number" ? viewOpt.left : Number.NaN;
+          const top = typeof viewOpt.top === "number" ? viewOpt.top : Number.NaN;
+          const right = typeof viewOpt.right === "number" ? viewOpt.right : Number.NaN;
+          const bottom = typeof viewOpt.bottom === "number" ? viewOpt.bottom : Number.NaN;
+          if (Number.isFinite(left) && Number.isFinite(top) && Number.isFinite(right) && Number.isFinite(bottom) && right > left && bottom > top) {
+            initialViewRect = { left, top, right, bottom };
           }
         }
         const preferCanvas = !!this.settings.enableSessionImageCache && !!this.settings.preferCanvasImagesWhenCaching;
@@ -16572,6 +16659,7 @@ var ZoomMapPlugin = class extends import_obsidian26.Plugin {
           displayOnly: !!opts.displayOnly,
           initialZoom,
           initialCenter,
+          initialViewRect,
           viewportFrame: typeof opts.viewportFrame === "string" ? opts.viewportFrame.trim() : void 0,
           viewportFrameInsets: yamlFrameInsets
         };

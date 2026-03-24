@@ -159,6 +159,12 @@ export interface ZoomMapConfig {
   yamlMarkerLayers?: string[];
   initialZoom?: number;
   initialCenter?: { x: number; y: number };
+  initialViewRect?: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  };
   viewportFrame?: string;
   viewportFrameInsets?: {
     unit: "framePx" | "percent";
@@ -464,6 +470,7 @@ function isScaleLikeSticker(m: Marker): boolean { return !!m.scaleLikeSticker; }
 
 interface ScreenDisplayPluginApi {
   sendNoteByPath(path: string): Promise<void>;
+  sendMarkdownWithFog(markdown: string, sourcePath: string, fogKey?: string): Promise<void>;
 }
 
 export class MapInstance extends Component {
@@ -1008,6 +1015,53 @@ export class MapInstance extends Component {
     this.captureViewIfVisible();
 	this.renderDrawingEditHandles();
   }
+  
+  private applyInitialViewRect(rect: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  }): void {
+    const r = this.viewportEl.getBoundingClientRect();
+    this.vw = r.width;
+    this.vh = r.height;
+
+    if (this.vw < 2 || this.vh < 2) return;
+    if (!this.imgW || !this.imgH) {
+      this.fitToView();
+      return;
+    }
+
+    const worldW = Math.abs(rect.right - rect.left) * this.imgW;
+    const worldH = Math.abs(rect.bottom - rect.top) * this.imgH;
+    if (!Number.isFinite(worldW) || !Number.isFinite(worldH) || worldW <= 0 || worldH <= 0) {
+      this.fitToView();
+      return;
+    }
+
+    const center = {
+      x: (rect.left + rect.right) / 2,
+      y: (rect.top + rect.bottom) / 2,
+    };
+
+    // Spoiler-safe:
+    // If aspect ratios differ, prefer "cover" semantics so the player/fog view
+    // never reveals more map than the original GM view.
+    const zoomX = this.vw / worldW;
+    const zoomY = this.vh / worldH;
+    const z = clamp(Math.max(zoomX, zoomY), this.cfg.minZoom, this.cfg.maxZoom);
+
+    const worldX = center.x * this.imgW;
+    const worldY = center.y * this.imgH;
+
+    const tx = this.vw / 2 - worldX * z;
+    const ty = this.vh / 2 - worldY * z;
+
+    this.applyTransform(z, tx, ty);
+    this.initialViewApplied = true;
+    this.captureViewIfVisible();
+    this.renderDrawingEditHandles();
+  }
 
   private captureViewIfVisible(): void {
     if (!this.imgW || !this.imgH) return;
@@ -1318,15 +1372,23 @@ export class MapInstance extends Component {
   private getScreenDisplayPlugin(): ScreenDisplayPluginApi | null {
     const registry =
       (this.app as unknown as {
-        plugins?: { plugins?: Record<string, unknown> };
+        plugins?: { plugins?: Record<string, unknown> }
       }).plugins?.plugins ?? {};
 
     const raw = registry["ttrpg-tools-screen"] as
-      | { sendNoteByPath?: (path: string) => Promise<void> }
+      | {
+          sendNoteByPath?: (path: string) => Promise<void>;
+          sendMarkdownWithFog?: (markdown: string, sourcePath: string, fogKey?: string) => Promise<void>;
+        }
       | undefined;
 
-    if (!raw || typeof raw.sendNoteByPath !== "function") return null;
-    return { sendNoteByPath: raw.sendNoteByPath.bind(raw) };
+    if (
+      !raw ||
+      typeof raw.sendNoteByPath !== "function" ||
+      typeof raw.sendMarkdownWithFog !== "function"
+    ) return null;
+
+    return { sendNoteByPath: raw.sendNoteByPath.bind(raw), sendMarkdownWithFog: raw.sendMarkdownWithFog.bind(raw) };
   }
 
   private secondScreenFeatureEnabled(): boolean {
@@ -1473,6 +1535,24 @@ export class MapInstance extends Component {
     };
   }
   
+  private getCurrentViewRectForSecondScreen():
+    | { left: number; top: number; right: number; bottom: number }
+    | null {
+    if (!this.imgW || !this.imgH) return null;
+
+    const r = this.viewportEl.getBoundingClientRect();
+    const vw = r.width || this.vw || 0;
+    const vh = r.height || this.vh || 0;
+    if (vw < 2 || vh < 2) return null;
+
+    return {
+      left: (0 - this.tx) / this.scale / this.imgW,
+      top: (0 - this.ty) / this.scale / this.imgH,
+      right: (vw - this.tx) / this.scale / this.imgW,
+      bottom: (vh - this.ty) / this.scale / this.imgH,
+    };
+  }
+  
   private getCurrentOuterAspectForSecondScreen(): number | null {
     const r = this.el.getBoundingClientRect();
     const w = r.width || 0;
@@ -1483,21 +1563,25 @@ export class MapInstance extends Component {
 
   private buildSecondScreenNoteContent(markersPath: string): string {
     const view = this.getCurrentViewForSecondScreen();
+	const viewRect = this.getCurrentViewRectForSecondScreen();
     const aspect = this.getCurrentOuterAspectForSecondScreen();
 
     // Must match the padding used by the Player Screen plugin:
     // 16px on each side => 32px total available space reduction.
     const padPx = 32;
+	
+    const availW = `var(--ttrpg-screen-avail-w, calc(100vw - ${padPx}px))`;
+    const availH = `var(--ttrpg-screen-avail-h, calc(100vh - ${padPx}px))`;
 
     const width =
       aspect && Number.isFinite(aspect) && aspect > 0
-        ? `min(calc(100vw - ${padPx}px), calc((100vh - ${padPx}px) * ${aspect.toFixed(6)}))`
-        : `calc(100vw - ${padPx}px)`;
+        ? `min(${availW}, calc(${availH} * ${aspect.toFixed(6)}))`
+        : availW;
 
     const height =
       aspect && Number.isFinite(aspect) && aspect > 0
-        ? `min(calc((100vw - ${padPx}px) / ${aspect.toFixed(6)}), calc(100vh - ${padPx}px))`
-        : `calc(100vh - ${padPx}px)`;
+        ? `min(calc(${availW} / ${aspect.toFixed(6)}), ${availH})`
+        : availH;
 
     const yaml: Record<string, unknown> = {
       image: this.getActiveBasePath(),
@@ -1533,13 +1617,22 @@ export class MapInstance extends Component {
         zoom: Number(view.zoom.toFixed(4)),
         centerX: Number(view.centerX.toFixed(6)),
         centerY: Number(view.centerY.toFixed(6)),
+        ...(viewRect
+          ? {
+              left: Number(viewRect.left.toFixed(6)),
+              top: Number(viewRect.top.toFixed(6)),
+              right: Number(viewRect.right.toFixed(6)),
+              bottom: Number(viewRect.bottom.toFixed(6)),
+              fit: "cover",
+            }
+          : {}),
       };
     }
 
     return `\`\`\`zoommap\n${stringifyYaml(yaml).trimEnd()}\n\`\`\`\n`;
   }
 
-  private async sendToSecondScreen(): Promise<void> {
+  private async sendToSecondScreen(useFog = false): Promise<void> {
     if (!this.data) return;
 
     if (!this.secondScreenFeatureEnabled()) {
@@ -1589,12 +1682,18 @@ export class MapInstance extends Component {
     } else {
       await this.app.vault.create(notePath, noteContent);
     }
+	
+    const fogKey = `zoommap-secondscreen:${markersPath}`;
 
     sec.notePath = notePath;
     sec.markersPath = markersPath;
     await this.saveDataSoon();
 
-    await screen.sendNoteByPath(notePath);
+    if (useFog) {
+      await screen.sendMarkdownWithFog(noteContent, notePath, fogKey);
+    } else {
+      await screen.sendNoteByPath(notePath);
+    }
   }
   
   private hasViewportFrame(): boolean {
@@ -1927,7 +2026,7 @@ export class MapInstance extends Component {
 
   private scheduleTryApplyInitialViewFromCallout(): void {
     if (this.cfg.responsive) return;
-    if (!this.cfg.initialZoom || !this.cfg.initialCenter) return;
+    if (!this.cfg.initialViewRect && (!this.cfg.initialZoom || !this.cfg.initialCenter)) return;
     if (this.initialViewApplied) return;
 
     const callouts = this.collectAncestorCallouts();
@@ -1940,7 +2039,11 @@ export class MapInstance extends Component {
       const r = this.viewportEl.getBoundingClientRect();
       if ((r.width || 0) < 2 || (r.height || 0) < 2) return;
 
-      this.applyInitialView(this.cfg.initialZoom!, this.cfg.initialCenter!);
+      if (this.cfg.initialViewRect) {
+        this.applyInitialViewRect(this.cfg.initialViewRect);
+      } else {
+        this.applyInitialView(this.cfg.initialZoom!, this.cfg.initialCenter!);
+      }
       if (this.isCanvas()) this.renderCanvas();
       this.renderMarkersOnly();
     };
@@ -2264,6 +2367,8 @@ export class MapInstance extends Component {
 
 	if (this.cfg.responsive) {
 	  this.fitToView();
+	} else if (this.cfg.initialViewRect) {
+	  this.applyInitialViewRect(this.cfg.initialViewRect);
 	} else if (this.cfg.initialZoom && this.cfg.initialCenter) {
 	  this.applyInitialView(this.cfg.initialZoom, this.cfg.initialCenter);
 	} else {
@@ -5260,7 +5365,9 @@ export class MapInstance extends Component {
     // Apply initial view once, otherwise restore last known view.
     if (oldVw < 2 || oldVh < 2) {
       if (!this.initialViewApplied) {
-        if (this.cfg.initialZoom && this.cfg.initialCenter) {
+        if (this.cfg.initialViewRect) {
+          this.applyInitialViewRect(this.cfg.initialViewRect);
+        } else if (this.cfg.initialZoom && this.cfg.initialCenter) {
           this.applyInitialView(this.cfg.initialZoom, this.cfg.initialCenter);
         } else {
           this.fitToView();
@@ -7807,11 +7914,23 @@ if (this.plugin.settings.enableTextLayers && this.data) {
         { type: "separator" },
         {
           label: "Display on screen",
-          action: () => {
-            this.closeMenu();
-            void this.sendToSecondScreen();
-          },
-        },
+          children: [
+            {
+              label: "Normal",
+              action: () => {
+                this.closeMenu();
+                void this.sendToSecondScreen(false);
+              },
+            },
+            {
+              label: "Fog of war",
+              action: () => {
+                this.closeMenu();
+                void this.sendToSecondScreen(true);
+              },
+            },
+          ],
+        }
       );
     }
 

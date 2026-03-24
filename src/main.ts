@@ -200,6 +200,11 @@ interface YamlOptions {
     zoom?: number | string;
     centerX?: number;
     centerY?: number;
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+    fit?: "cover" | "contain";
   };
 
 
@@ -548,6 +553,9 @@ export default class ZoomMapPlugin extends Plugin {
 		
 		let initialZoom: number | undefined;
 		let initialCenter: { x: number; y: number } | undefined;
+		let initialViewRect:
+		  | { left: number; top: number; right: number; bottom: number }
+		  | undefined;
 
 		const viewOpt = opts.view;
 		if (viewOpt && typeof viewOpt === "object") {
@@ -566,6 +574,22 @@ export default class ZoomMapPlugin extends Plugin {
 			  x: Math.min(Math.max(cx, 0), 1),
 			  y: Math.min(Math.max(cy, 0), 1),
 			};
+		  }
+
+		  const left = typeof viewOpt.left === "number" ? viewOpt.left : Number.NaN;
+		  const top = typeof viewOpt.top === "number" ? viewOpt.top : Number.NaN;
+		  const right = typeof viewOpt.right === "number" ? viewOpt.right : Number.NaN;
+		  const bottom = typeof viewOpt.bottom === "number" ? viewOpt.bottom : Number.NaN;
+
+		  if (
+			Number.isFinite(left) &&
+			Number.isFinite(top) &&
+			Number.isFinite(right) &&
+			Number.isFinite(bottom) &&
+			right > left &&
+			bottom > top
+		  ) {
+			initialViewRect = { left, top, right, bottom };
 		  }
 		}
 
@@ -703,6 +727,7 @@ export default class ZoomMapPlugin extends Plugin {
           displayOnly: !!opts.displayOnly,
 		  initialZoom,
 		  initialCenter,
+          initialViewRect,
           viewportFrame: typeof opts.viewportFrame === "string" ? opts.viewportFrame.trim() : undefined,
           viewportFrameInsets: yamlFrameInsets,
 		};
